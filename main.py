@@ -27,9 +27,7 @@ class GroupBackupPlugin(Star):
         super().__init__(context)
         self.config = config if config else {}
         self.plugin_data_dir = StarTools.get_data_dir("astrbot_plugin_group_backup")
-        self.admin_users = [int(u) for u in self.config.get("admin_users", [])]
         self.download_semaphore = asyncio.Semaphore(5) # 限制并发下载数
-        self.default_backup_options = ["群信息", "群头像", "群成员", "群公告", "群精华", "群相册", "群荣誉"]
         
         # 字段映射：配置项名 -> API 返回的键名
         self.field_map = {
@@ -44,14 +42,41 @@ class GroupBackupPlugin(Star):
         }
 
     @property
+    def admin_users(self) -> List[int]:
+        return [int(u) for u in self.config.get("admin_users", [])]
+
+    @property
     def backup_options(self) -> List[str]:
-        return self.config.get("backup_options", self.default_backup_options)
+        return self.config.get("backup_options", ["群信息", "群头像", "群成员", "群公告", "群精华", "群相册", "群荣誉"])
+
+    @property
+    def restore_options(self) -> List[str]:
+        return self.config.get("restore_options", ["群名称", "群头像", "群昵称", "群头衔", "群管理", "群相册"])
 
     def _format_timestamp(self, timestamp):
         """格式化时间戳"""
         if isinstance(timestamp, (int, float)) and timestamp > 0:
             return datetime.fromtimestamp(float(timestamp)).strftime("%Y-%m-%d %H:%M:%S")
         return "未知"
+
+    def _format_essence_content(self, raw_content):
+        """格式化精华消息内容"""
+        content_str = ""
+        if isinstance(raw_content, list):
+            for seg in raw_content:
+                if seg.get("type") == "text":
+                    content_str += seg.get("data", {}).get("text", "")
+                elif seg.get("type") == "at":
+                    content_str += f"@{seg.get('data', {}).get('qq', '')} "
+                elif seg.get("type") == "image":
+                    content_str += "[图片]"
+                elif seg.get("type") == "face":
+                    content_str += "[表情]"
+                else:
+                    content_str += f"[{seg.get('type', '未知')}]"
+        else:
+            content_str = str(raw_content)
+        return content_str
 
     async def _download_file(self, url: str, save_path: Path, overwrite: bool = False):
         """下载文件，如果已存在且未开启 overwrite 则跳过"""
@@ -165,7 +190,9 @@ class GroupBackupPlugin(Star):
         albums = []
         album_media_map = {}
         try:
-            raw_albums = await client.api.call_action("get_qun_album_list", group_id=str(group_id))
+            raw_albums = await client.get_qun_album_list(group_id=str(group_id))
+            if isinstance(raw_albums, dict) and raw_albums.get("retcode", 0) != 0:
+                raise Exception(f"API 响应异常: {raw_albums}")
             logger.debug(f"API 响应 (get_qun_album_list): {json.dumps(raw_albums, ensure_ascii=False)}")
             if raw_albums:
                 logger.info(f"发现 {len(raw_albums)} 个相册，正在备份原图...")
@@ -219,7 +246,9 @@ class GroupBackupPlugin(Star):
                     
                     if is_album_updated:
                         try:
-                            result = await client.api.call_action("get_group_album_media_list", group_id=str(group_id), album_id=album_id)
+                            result = await client.get_group_album_media_list(group_id=str(group_id), album_id=album_id)
+                            if isinstance(result, dict) and result.get("retcode", 0) != 0:
+                                raise Exception(f"API 响应异常: {result}")
                             logger.debug(f"获取相册 {album_name}({album_id}) 媒体列表结果: {json.dumps(result, ensure_ascii=False)}")
                             
                             raw_media_list = []
@@ -351,7 +380,7 @@ class GroupBackupPlugin(Star):
             group_detail = {}
             if "群信息" in self.backup_options:
                 try:
-                    raw_detail = await client.api.call_action("get_group_detail_info", group_id=group_id)
+                    raw_detail = await client.get_group_detail_info(group_id=group_id)
                     logger.debug(f"API 响应 (get_group_detail_info): {json.dumps(raw_detail, ensure_ascii=False)}")
                     
                     # 精简群详细信息
@@ -440,7 +469,7 @@ class GroupBackupPlugin(Star):
             notices = []
             if "群公告" in self.backup_options:
                 try:
-                    raw_notices = await client.api.call_action("_get_group_notice", group_id=group_id)
+                    raw_notices = await client._get_group_notice(group_id=group_id)
                     logger.debug(f"API 响应 (_get_group_notice): {json.dumps(raw_notices, ensure_ascii=False)}")
                     
                     # 精简公告信息
@@ -505,7 +534,7 @@ class GroupBackupPlugin(Star):
             essence = []
             if "群精华" in self.backup_options:
                 try:
-                    raw_essence = await client.api.call_action("get_essence_msg_list", group_id=group_id)
+                    raw_essence = await client.get_essence_msg_list(group_id=group_id)
                     logger.debug(f"API 响应 (get_essence_msg_list): {json.dumps(raw_essence, ensure_ascii=False)}")
                     
                     # 确保 raw_essence 是列表
@@ -570,7 +599,7 @@ class GroupBackupPlugin(Star):
             honors = {}
             if "群荣誉" in self.backup_options:
                 try:
-                    honors = await client.api.call_action("get_group_honor_info", group_id=group_id, type="all")
+                    honors = await client.get_group_honor_info(group_id=group_id, type="all")
                     logger.debug(f"API 响应 (get_group_honor_info): {json.dumps(honors, ensure_ascii=False)}")
                 except Exception as e:
                     logger.warning(f"获取群荣誉失败: {e}")
@@ -716,7 +745,6 @@ class GroupBackupPlugin(Star):
         except Exception as e:
             logger.error(f"删除群备份出错: {e}")
             yield event.plain_result(f"❌ 删除失败: {e}")
-
     @filter.command("群导出")
     async def group_export(self, event: AstrMessageEvent, args: str = ""):
         """群导出 [群号] [选项...]：导出指定数据。选项可选：群信息、群成员、群公告、群精华、群荣誉、群相册"""
@@ -759,6 +787,10 @@ class GroupBackupPlugin(Star):
         try:
             client = event.bot
             logger.info(f"收到导出请求: 群号={group_id}, 选项={requested_options}, 原始消息='{event.message_str}'")
+            
+            # 加载上一次备份的数据用于异常回退
+            latest_data = self._get_latest_backup_data(group_id)
+            
             yield event.plain_result(f"正在导出群 {group_id} 的数据: {', '.join(requested_options)}...")
 
             # --- 处理群相册备份与打包 ---
@@ -766,8 +798,6 @@ class GroupBackupPlugin(Star):
             if "群相册" in requested_options:
                 # 1. 先执行一次备份
                 logger.info(f"正在执行群 {group_id} 的相册导出前备份...")
-                # 尝试加载上次备份的数据以支持增量
-                latest_data = self._get_latest_backup_data(group_id)
                 await self._backup_albums(client, group_id, latest_data)
                 
                 # 2. 压缩打包
@@ -819,27 +849,42 @@ class GroupBackupPlugin(Star):
                 with pd.ExcelWriter(output_buffer, engine="openpyxl") as writer:
                     # 1. 导出群概况 (群信息)
                     if "群信息" in requested_options:
+                        detail = {}
                         try:
-                            detail = await client.api.call_action("get_group_detail_info", group_id=group_id)
-                            if detail:
-                                display_detail = {
-                                    "群名称": detail.get("groupName"),
-                                    "群号": detail.get("groupCode"),
-                                    "群分类": detail.get("groupClassText"),
-                                    "群主QQ": detail.get("ownerUin"),
-                                    "成员人数": detail.get("memberNum"),
-                                    "最大人数": detail.get("maxMemberNum"),
-                                    "当前活跃人数": detail.get("activeMemberNum"),
-                                }
-                                detail_list = [{"属性": k, "值": v} for k, v in display_detail.items() if v is not None]
-                                pd.DataFrame(detail_list).to_excel(writer, index=False, sheet_name="群概况")
+                            raw_res = await client.get_group_detail_info(group_id=group_id)
+                            if isinstance(raw_res, dict) and raw_res.get("retcode", 0) != 0:
+                                raise Exception(f"API 响应异常: {raw_res}")
+                            detail = raw_res
                         except Exception as e:
-                            logger.warning(f"导出群概况失败: {e}")
+                            logger.warning(f"获取实时群概况失败，尝试使用备份数据: {e}")
+                            detail = latest_data.get("group_detail", {})
+                            
+                        if detail:
+                            display_detail = {
+                                "群名称": detail.get("groupName"),
+                                "群号": detail.get("groupCode"),
+                                "群分类": detail.get("groupClassText"),
+                                "群主QQ": detail.get("ownerUin"),
+                                "成员人数": detail.get("memberNum"),
+                                "最大人数": detail.get("maxMemberNum"),
+                                "当前活跃人数": detail.get("activeMemberNum"),
+                            }
+                            detail_list = [{"属性": k, "值": v} for k, v in display_detail.items() if v is not None]
+                            pd.DataFrame(detail_list).to_excel(writer, index=False, sheet_name="群概况")
 
                     # 2. 导出群成员
                     if "群成员" in requested_options:
+                        members = []
                         try:
-                            members = await client.get_group_member_list(group_id=group_id)
+                            raw_res = await client.get_group_member_list(group_id=group_id)
+                            if isinstance(raw_res, dict) and raw_res.get("retcode", 0) != 0:
+                                raise Exception(f"API 响应异常: {raw_res}")
+                            members = raw_res
+                        except Exception as e:
+                            logger.warning(f"获取实时群成员失败，尝试使用备份数据: {e}")
+                            members = latest_data.get("members", [])
+
+                        if members:
                             processed_members = []
                             for m in members:
                                 item = {}
@@ -852,137 +897,146 @@ class GroupBackupPlugin(Star):
                                     item[opt] = val
                                 processed_members.append(item)
                             pd.DataFrame(processed_members).to_excel(writer, index=False, sheet_name="群成员")
-                        except Exception as e:
-                            logger.warning(f"导出群成员失败: {e}")
 
                     # 3. 导出群公告
                     if "群公告" in requested_options:
+                        notices = []
                         try:
-                            notices = await client.api.call_action("_get_group_notice", group_id=group_id)
-                            logger.debug(f"群 {group_id} 公告 API 响应: {json.dumps(notices, ensure_ascii=False)[:1000]}...") # 限制日志长度
-                            if notices:
-                                processed_notices = []
-                                for n in notices:
-                                    msg = n.get("message", {})
-                                    content = msg.get("text", "")
-                                    
-                                    # 格式化处理：替换 HTML 实体
-                                    if content:
-                                        content = content.replace("&#10;", "\n").replace("&nbsp;", " ")
-                                    
-                                    # 检查并添加图片 URL
-                                    images = msg.get("image") or msg.get("images")
-                                    if images:
-                                        if not isinstance(images, list):
-                                            images = [images]
-                                        urls = []
-                                        for img in images:
-                                            if isinstance(img, dict):
-                                                img_id = img.get("id")
-                                                url = img.get("url")
-                                                if not url and img_id:
-                                                    # 统一使用抓包格式的 URL
-                                                    url = f"https://gdynamic.qpic.cn/gdynamic/{img_id}/628"
-                                                if url:
-                                                    urls.append(url)
-                                        if urls:
-                                            content += "\n图片: " + " | ".join(urls)
-                                    processed_notices.append({
-                                        "发布者": n.get("sender_id"),
-                                        "发布时间": self._format_timestamp(n.get("publish_time")),
-                                        "内容": content
-                                    })
-                                pd.DataFrame(processed_notices).to_excel(writer, index=False, sheet_name="群公告")
+                            raw_res = await client._get_group_notice(group_id=group_id)
+                            if isinstance(raw_res, dict) and raw_res.get("retcode", 0) != 0:
+                                raise Exception(f"API 响应异常: {raw_res}")
+                            notices = raw_res
                         except Exception as e:
-                            logger.warning(f"导出群公告失败: {e}")
+                            logger.warning(f"获取实时群公告失败，尝试使用备份数据: {e}")
+                            notices = latest_data.get("notices", [])
+
+                        if notices:
+                            processed_notices = []
+                            for n in notices:
+                                msg = n.get("message", {})
+                                content = msg.get("text", "")
+                                
+                                # 格式化处理：替换 HTML 实体
+                                if content:
+                                    content = content.replace("&#10;", "\n").replace("&nbsp;", " ")
+                                
+                                # 检查并添加图片 URL
+                                images = msg.get("image") or msg.get("images")
+                                if images:
+                                    if not isinstance(images, list):
+                                        images = [images]
+                                    urls = []
+                                    for img in images:
+                                        if isinstance(img, dict):
+                                            img_id = img.get("id")
+                                            url = img.get("url")
+                                            if not url and img_id:
+                                                # 统一使用抓包格式的 URL
+                                                url = f"https://gdynamic.qpic.cn/gdynamic/{img_id}/628"
+                                            if url:
+                                                urls.append(url)
+                                    if urls:
+                                        content += "\n图片: " + " | ".join(urls)
+                                processed_notices.append({
+                                    "发布者": n.get("sender_id"),
+                                    "发布时间": self._format_timestamp(n.get("publish_time")),
+                                    "内容": content
+                                })
+                            if processed_notices:
+                                pd.DataFrame(processed_notices).to_excel(writer, index=False, sheet_name="群公告")
 
                     # 4. 导出群精华
                     if "群精华" in requested_options:
+                        essence = []
                         try:
-                            essence = await client.api.call_action("get_essence_msg_list", group_id=group_id)
-                            if isinstance(essence, dict) and "data" in essence:
-                                essence = essence["data"]
-                            if essence and isinstance(essence, list):
-                                processed_essence = []
-                                for e in essence:
-                                    raw_content = e.get("content", [])
-                                    content_str = ""
-                                    if isinstance(raw_content, list):
-                                        for seg in raw_content:
-                                            if seg.get("type") == "text":
-                                                content_str += seg.get("data", {}).get("text", "")
-                                            elif seg.get("type") == "at":
-                                                content_str += f"@{seg.get('data', {}).get('qq', '')} "
-                                            else:
-                                                content_str += f"[{seg.get('type')}]"
-                                    else:
-                                        content_str = str(raw_content)
-
-                                    processed_essence.append({
-                                        "发送者": e.get("sender_id"),
-                                        "设精时间": self._format_timestamp(e.get("operator_time")),
-                                        "内容": content_str,
-                                        "操作者": e.get("operator_id")
-                                    })
-                                pd.DataFrame(processed_essence).to_excel(writer, index=False, sheet_name="群精华")
+                            raw_res = await client.get_essence_msg_list(group_id=group_id)
+                            if isinstance(raw_res, dict) and raw_res.get("retcode", 0) != 0:
+                                raise Exception(f"API 响应异常: {raw_res}")
+                            essence = raw_res
                         except Exception as e:
-                            logger.warning(f"导出群精华失败: {e}")
+                            logger.warning(f"获取实时群精华失败，尝试使用备份数据: {e}")
+                            essence = latest_data.get("essence", [])
+
+                        if isinstance(essence, dict) and "data" in essence:
+                            essence = essence["data"]
+                        if essence and isinstance(essence, list):
+                            processed_essence = []
+                            for e in essence:
+                                processed_essence.append({
+                                    "发送者": e.get("sender_id"),
+                                    "设精时间": self._format_timestamp(e.get("operator_time")),
+                                    "内容": self._format_essence_content(e.get("content", [])),
+                                    "操作者": e.get("operator_id")
+                                })
+                            pd.DataFrame(processed_essence).to_excel(writer, index=False, sheet_name="群精华")
 
                     # 5. 导出群荣誉
                     if "群荣誉" in requested_options:
+                        honors = {}
                         try:
-                            honors = await client.api.call_action("get_group_honor_info", group_id=group_id, type="all")
-                            if honors:
-                                honor_list = []
-                                honor_type_map = {
-                                    "current_talkative": "龙王",
-                                    "talkative_list": "龙王历史获得者",
-                                    "performer_list": "群聊之火",
-                                    "legend_list": "群聊炽焰",
-                                    "emotion_list": "快乐源泉",
-                                    "strong_newbie_list": "善财福禄寿"
-                                }
-                                for honor_type, honor_data in honors.items():
-                                    if honor_type == "group_id": continue
-                                    type_name = honor_type_map.get(honor_type, honor_type)
-                                    
-                                    if isinstance(honor_data, dict) and "user_id" in honor_data:
+                            raw_res = await client.get_group_honor_info(group_id=group_id, type="all")
+                            if isinstance(raw_res, dict) and raw_res.get("retcode", 0) != 0:
+                                raise Exception(f"API 响应异常: {raw_res}")
+                            honors = raw_res
+                        except Exception as e:
+                            logger.warning(f"获取实时群荣誉失败，尝试使用备份数据: {e}")
+                            honors = latest_data.get("honors", {})
+
+                        if honors:
+                            honor_list = []
+                            honor_type_map = {
+                                "current_talkative": "龙王",
+                                "talkative_list": "龙王历史获得者",
+                                "performer_list": "群聊之火",
+                                "legend_list": "群聊炽焰",
+                                "emotion_list": "快乐源泉",
+                                "strong_newbie_list": "善财福禄寿"
+                            }
+                            for honor_type, honor_data in honors.items():
+                                if honor_type == "group_id": continue
+                                type_name = honor_type_map.get(honor_type, honor_type)
+                                
+                                if isinstance(honor_data, dict) and "user_id" in honor_data:
+                                    honor_list.append({
+                                        "荣誉类型": type_name, 
+                                        "QQ号": honor_data.get("user_id"), 
+                                        "昵称": honor_data.get("nickname"),
+                                        "描述": honor_data.get("description", "")
+                                    })
+                                elif isinstance(honor_data, list):
+                                    for h in honor_data:
                                         honor_list.append({
                                             "荣誉类型": type_name, 
-                                            "QQ号": honor_data.get("user_id"), 
-                                            "昵称": honor_data.get("nickname"),
-                                            "描述": honor_data.get("description", "")
+                                            "QQ号": h.get("user_id"), 
+                                            "昵称": h.get("nickname"),
+                                            "描述": h.get("description", "")
                                         })
-                                    elif isinstance(honor_data, list):
-                                        for h in honor_data:
-                                            honor_list.append({
-                                                "荣誉类型": type_name, 
-                                                "QQ号": h.get("user_id"), 
-                                                "昵称": h.get("nickname"),
-                                                "描述": h.get("description", "")
-                                            })
-                                if honor_list:
-                                    pd.DataFrame(honor_list).to_excel(writer, index=False, sheet_name="群荣誉")
-                        except Exception as e:
-                            logger.warning(f"导出群荣誉失败: {e}")
+                            if honor_list:
+                                pd.DataFrame(honor_list).to_excel(writer, index=False, sheet_name="群荣誉")
 
                     # 6. 导出群相册列表
                     if "群相册" in requested_options:
+                        albums_list = []
                         try:
-                            albums = await client.api.call_action("get_qun_album_list", group_id=str(group_id))
-                            if albums:
-                                processed_albums = []
-                                for a in albums:
-                                    processed_albums.append({
-                                        "相册名": a.get("name"),
-                                        "图片数量": a.get("upload_number"),
-                                        "创建者": a.get("creator", {}).get("nick"),
-                                        "创建时间": self._format_timestamp(a.get("create_time")),
-                                        "修改时间": self._format_timestamp(a.get("modify_time"))
-                                    })
-                                pd.DataFrame(processed_albums).to_excel(writer, index=False, sheet_name="群相册列表")
+                            raw_res = await client.get_qun_album_list(group_id=str(group_id))
+                            if isinstance(raw_res, dict) and raw_res.get("retcode", 0) != 0:
+                                raise Exception(f"API 响应异常: {raw_res}")
+                            albums_list = raw_res
                         except Exception as e:
-                            logger.warning(f"导出群相册列表失败: {e}")
+                            logger.warning(f"获取实时群相册列表失败，尝试使用备份数据: {e}")
+                            albums_list = latest_data.get("albums", [])
+
+                        if albums_list:
+                            processed_albums = []
+                            for a in albums_list:
+                                processed_albums.append({
+                                    "相册名": a.get("name"),
+                                    "图片数量": a.get("upload_number"),
+                                    "创建者": a.get("creator", {}).get("nick"),
+                                    "创建时间": self._format_timestamp(a.get("create_time")),
+                                    "修改时间": self._format_timestamp(a.get("modify_time"))
+                                })
+                            pd.DataFrame(processed_albums).to_excel(writer, index=False, sheet_name="群相册列表")
                 
                     # 7. 导出已删除的项目（回收站数据）
                     archive_file = Path(self.plugin_data_dir) / str(group_id) / "logs" / "deleted_items.json"
@@ -1024,13 +1078,20 @@ class GroupBackupPlugin(Star):
                                             "删除时间": deleted_at,
                                             "发送者": content.get("sender_id"),
                                             "设精时间": self._format_timestamp(content.get("operator_time")),
-                                            "内容": str(content.get("content"))
+                                            "内容": self._format_essence_content(content.get("content", []))
                                         })
                                     elif item_type == "albums":
                                         processed_items.append({
                                             "删除时间": deleted_at,
                                             "相册ID": content.get("album_id"),
                                             "相册名": content.get("name")
+                                        })
+                                    elif item_type == "media":
+                                        processed_items.append({
+                                            "删除时间": deleted_at,
+                                            "媒体ID": content.get("media_id"),
+                                            "类型": "图片" if content.get("media_type") == 0 else "视频",
+                                            "原始URL": content.get("url")
                                         })
                                     else:
                                         # 通用处理
@@ -1083,3 +1144,189 @@ class GroupBackupPlugin(Star):
         except Exception as e:
             logger.error(f"群导出出错: {e}")
             yield event.plain_result(f"❌ 导出失败: {e}")
+
+    @filter.command("群恢复")
+    async def group_restore(self, event: AstrMessageEvent, group_id_arg: str = ""):
+        """群恢复 [群号]：将指定群或当前群的备份数据恢复到当前群"""
+        # 权限检查
+        sender_id = int(event.get_sender_id())
+        if self.admin_users and sender_id not in self.admin_users:
+            yield event.plain_result("❌ 您没有权限执行此指令。")
+            return
+
+        current_group_id = event.get_group_id()
+        if not current_group_id:
+            yield event.plain_result("❌ 请在群聊中使用此指令。")
+            return
+        current_group_id = int(current_group_id)
+
+        # 确定备份来源群号
+        source_group_id = int(group_id_arg) if group_id_arg and group_id_arg.isdigit() else current_group_id
+
+        try:
+            client = event.bot
+            yield event.plain_result(f"正在从群 {source_group_id} 的备份恢复数据到当前群...")
+
+            # 1. 加载备份数据
+            latest_data = self._get_latest_backup_data(source_group_id)
+            if not latest_data:
+                yield event.plain_result(f"❌ 未找到群 {source_group_id} 的备份数据。")
+                return
+
+            restore_options = self.restore_options
+            group_info = latest_data.get("group_detail", {})
+            
+            # 2. 恢复群名称
+            if "群名称" in restore_options:
+                new_name = group_info.get("groupName")
+                if new_name:
+                    logger.info(f"正在恢复群名称: {new_name}")
+                    await client.set_group_name(group_id=current_group_id, group_name=new_name)
+                    logger.info("群名称恢复完成")
+                else:
+                    logger.warning("备份数据中未找到群名称，跳过恢复")
+
+            # 3. 恢复群头像
+            if "群头像" in restore_options:
+                # 尝试从备份目录查找头像文件，优先找 group_avatar.png
+                avatar_path = Path(self.plugin_data_dir) / str(source_group_id) / "group_avatar.png"
+                if not avatar_path.exists():
+                    avatar_path = Path(self.plugin_data_dir) / str(source_group_id) / "avatar.png"
+                if not avatar_path.exists():
+                    avatar_path = Path(self.plugin_data_dir) / str(source_group_id) / "avatar.jpg"
+                
+                if avatar_path.exists():
+                    logger.info(f"正在恢复群头像: {avatar_path}")
+                    await client.set_group_portrait(group_id=current_group_id, file=f"file://{avatar_path.absolute()}")
+                    logger.info("群头像恢复完成")
+                else:
+                    logger.warning(f"未找到备份的群头像文件 (尝试过 group_avatar.png, avatar.png, avatar.jpg): {avatar_path}")
+
+            # 4. 恢复群成员设置 (昵称、头衔、管理员)
+            if any(opt in restore_options for opt in ["群昵称", "群头衔", "群管理"]):
+                backup_members = latest_data.get("members", [])
+                if backup_members:
+                    # 获取当前群成员列表
+                    current_members_raw = await client.get_group_member_list(group_id=current_group_id)
+                    current_member_ids = {m.get("user_id") for m in current_members_raw} if current_members_raw else set()
+                    
+                    restore_count = 0
+                    for bm in backup_members:
+                        user_id = bm.get("user_id")
+                        if user_id not in current_member_ids:
+                            continue
+                        
+                        # 恢复群昵称 (名片)
+                        if "群昵称" in restore_options and "card" in bm:
+                            await client.set_group_card(group_id=current_group_id, user_id=user_id, card=bm["card"])
+                        
+                        # 恢复群头衔
+                        if "群头衔" in restore_options and "special_title" in bm:
+                            await client.set_group_special_title(group_id=current_group_id, user_id=user_id, special_title=bm["special_title"])
+                        
+                        # 恢复群管理
+                        if "群管理" in restore_options and "role" in bm:
+                            is_admin = bm["role"] == "admin"
+                            if bm["role"] != "owner":
+                                await client.set_group_admin(group_id=current_group_id, user_id=user_id, enable=is_admin)
+                        
+                        restore_count += 1
+                        if restore_count % 10 == 0:
+                            logger.info(f"已恢复 {restore_count} 名成员的设置...")
+
+                    logger.info(f"群成员设置恢复完成 (共 {restore_count} 人)")
+
+            # 5. 恢复群相册
+            if "群相册" in restore_options:
+                backup_albums = latest_data.get("albums", [])
+                backup_album_media = latest_data.get("album_media", {})
+                
+                if backup_albums:
+                    # 获取当前群相册列表，用于比对同名相册
+                    try:
+                        current_albums = await client.get_qun_album_list(group_id=str(current_group_id))
+                    except:
+                        current_albums = []
+                    
+                    album_name_to_id = {a.get("name"): a.get("album_id") for a in current_albums}
+                    
+                    for album in backup_albums:
+                        album_name = album.get("name")
+                        album_id = album.get("album_id")
+                        
+                        if album_name not in album_name_to_id:
+                            logger.warning(f"当前群不存在相册 '{album_name}'，请先手动创建同名相册。跳过此相册恢复。")
+                            continue
+                        
+                        target_album_id = album_name_to_id[album_name]
+                        media_list = backup_album_media.get(album_id, [])
+                        
+                        if not media_list:
+                            continue
+                        
+                        # 获取目标相册已有的媒体列表，避免重复上传
+                        try:
+                            target_media_raw = await client.get_group_album_media_list(group_id=str(current_group_id), album_id=target_album_id)
+                            
+                            existing_media_ids = set()
+                            
+                            # 如果返回的是字典且包含列表字段，尝试提取
+                            media_items = []
+                            if isinstance(target_media_raw, list):
+                                media_items = target_media_raw
+                            elif isinstance(target_media_raw, dict):
+                                media_items = target_media_raw.get("media_list", target_media_raw.get("list", []))
+                            
+                            for m in media_items:
+                                # 尝试提取各种可能的 ID
+                                mid = m.get("media_id") or m.get("id")
+                                if not mid and m.get("image"): mid = m.get("image", {}).get("lloc")
+                                if not mid and m.get("video"): mid = m.get("video", {}).get("id")
+                                if mid: existing_media_ids.add(str(mid))
+                        except Exception as e:
+                            logger.error(f"获取相册媒体列表失败: {e}")
+                            existing_media_ids = set()
+
+                        # 恢复图片
+                        album_path = Path(self.plugin_data_dir) / str(source_group_id) / "albums" / album_name
+                        if not album_path.exists():
+                            continue
+                        
+                        upload_count = 0
+                        for m in media_list:
+                            # 仅支持图片恢复，跳过视频 (media_type == 1)
+                            if m.get("media_type") != 0:
+                                continue
+                                
+                            m_id = str(m.get("media_id"))
+                            if m_id in existing_media_ids:
+                                # logger.debug(f"跳过已存在媒体: {m_id}")
+                                continue
+                            
+                            file_ext = ".jpg" 
+                            local_file = album_path / f"{m_id}{file_ext}"
+                            
+                            if local_file.exists():
+                                try:
+                                    # 调用上传 API
+                                    await client.upload_image_to_qun_album(
+                                        group_id=str(current_group_id),
+                                        album_id=target_album_id,
+                                        album_name=album_name,
+                                        file=f"file://{local_file.absolute()}"
+                                    )
+                                    upload_count += 1
+                                    if upload_count % 5 == 0:
+                                        logger.info(f"相册 '{album_name}' 已上传 {upload_count} 个文件...")
+                                except Exception as e:
+                                    logger.error(f"上传文件 {local_file} 到相册失败: {e}")
+
+                        logger.info(f"相册 '{album_name}' 恢复完成 (上传 {upload_count} 个新文件)")
+
+            yield event.plain_result(f"✅ 群数据恢复任务已执行完毕。")
+
+        except Exception as e:
+            logger.error(f"群恢复出错: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
+            yield event.plain_result(f"❌ 恢复过程中出现错误: {e}")
