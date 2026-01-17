@@ -19,7 +19,7 @@ import shutil
     "astrbot_plugin_group_backup",
     "Foolllll",
     "群备份插件，备份群成员、公告、精华等数据",
-    "0.1",
+    "1.0",
     "https://github.com/Foolllll-J/astrbot_plugin_group_backup"
 )
 class GroupBackupPlugin(Star):
@@ -475,12 +475,19 @@ class GroupBackupPlugin(Star):
                     # 精简公告信息
                     for n in raw_notices:
                         msg = n.get("message", {})
+                        settings = n.get("settings", {})
                         notice_item = {
-                            "notice_id": n.get("notice_id"),
-                            "sender_id": n.get("sender_id"),
-                            "publish_time": n.get("publish_time"),
-                            "text": msg.get("text", "")
-                        }
+                                "notice_id": n.get("notice_id"),
+                                "sender_id": n.get("sender_id"),
+                                "publish_time": n.get("publish_time"),
+                                "text": msg.get("text", ""),
+                                "read_num": n.get("read_num"),
+                                "settings": {
+                                    "is_show_edit_card": settings.get("is_show_edit_card"),
+                                    "tip_window_type": settings.get("tip_window_type"),
+                                    "confirm_required": settings.get("confirm_required")
+                                }
+                            }
                         # 解析图片信息
                         images = msg.get("image") or msg.get("images")
                         if images:
@@ -915,12 +922,10 @@ class GroupBackupPlugin(Star):
                             for n in notices:
                                 msg = n.get("message", {})
                                 content = msg.get("text", "")
-                                
-                                # 格式化处理：替换 HTML 实体
+
                                 if content:
                                     content = content.replace("&#10;", "\n").replace("&nbsp;", " ")
-                                
-                                # 检查并添加图片 URL
+
                                 images = msg.get("image") or msg.get("images")
                                 if images:
                                     if not isinstance(images, list):
@@ -931,17 +936,34 @@ class GroupBackupPlugin(Star):
                                             img_id = img.get("id")
                                             url = img.get("url")
                                             if not url and img_id:
-                                                # 统一使用抓包格式的 URL
                                                 url = f"https://gdynamic.qpic.cn/gdynamic/{img_id}/628"
                                             if url:
                                                 urls.append(url)
                                     if urls:
                                         content += "\n图片: " + " | ".join(urls)
-                                processed_notices.append({
+
+                                settings = n.get("settings", {})
+                                is_show_edit_card = settings.get("is_show_edit_card")
+                                tip_window_type = settings.get("tip_window_type")
+                                confirm_required = settings.get("confirm_required")
+                                read_num = n.get("read_num")
+
+                                notice_data = {
                                     "发布者": n.get("sender_id"),
                                     "发布时间": self._format_timestamp(n.get("publish_time")),
                                     "内容": content
-                                })
+                                }
+
+                                if read_num is not None:
+                                    notice_data["已读人数"] = read_num
+                                if is_show_edit_card is not None:
+                                    notice_data["引导改名片"] = "是" if is_show_edit_card == 1 else "否"
+                                if tip_window_type is not None:
+                                    notice_data["弹窗展示"] = "是" if tip_window_type == 0 else "否"
+                                if confirm_required is not None:
+                                    notice_data["需要确认"] = "是" if confirm_required == 1 else "否"
+
+                                processed_notices.append(notice_data)
                             if processed_notices:
                                 pd.DataFrame(processed_notices).to_excel(writer, index=False, sheet_name="群公告")
 
@@ -1149,8 +1171,9 @@ class GroupBackupPlugin(Star):
     async def group_restore(self, event: AstrMessageEvent, group_id_arg: str = ""):
         """群恢复 [群号]：将指定群或当前群的备份数据恢复到当前群"""
         # 权限检查
+        is_admin = event.is_admin()
         sender_id = int(event.get_sender_id())
-        if self.admin_users and sender_id not in self.admin_users:
+        if not is_admin and (not self.admin_users or sender_id not in self.admin_users):
             yield event.plain_result("❌ 您没有权限执行此指令。")
             return
 
@@ -1202,7 +1225,64 @@ class GroupBackupPlugin(Star):
                 else:
                     logger.warning(f"未找到备份的群头像文件 (尝试过 group_avatar.png, avatar.png, avatar.jpg): {avatar_path}")
 
-            # 4. 恢复群成员设置 (昵称、头衔、管理员)
+            # 4. 恢复群公告
+            if "群公告" in restore_options:
+                backup_notices = latest_data.get("notices", [])
+                if backup_notices:
+                    # 按发布时间升序恢复，保证时间线顺序
+                    try:
+                        backup_notices = sorted(backup_notices, key=lambda x: x.get("publish_time") or 0)
+                    except Exception as e:
+                        logger.warning(f"群公告排序失败，将按备份原顺序恢复: {e}")
+
+                    restore_count = 0
+                    for n in backup_notices:
+                        text = n.get("text", "") or ""
+                        if text:
+                            text = text.replace("&#10;", "\n").replace("&nbsp;", " ")
+
+                        settings = n.get("settings", {}) or {}
+                        is_show_edit_card = settings.get("is_show_edit_card")
+                        tip_window_type = settings.get("tip_window_type")
+                        confirm_required = settings.get("confirm_required")
+
+                        # 兼容旧备份：旧版 NapCat 没有 settings 字段，默认视为不需要确认
+                        if confirm_required is None:
+                            confirm_required = 0
+
+                        image_path = None
+                        images = n.get("images") or []
+                        if images:
+                            first = images[0]
+                            if isinstance(first, dict):
+                                local_rel = first.get("local_path")
+                                if local_rel:
+                                    abs_path = Path(self.plugin_data_dir) / str(source_group_id) / local_rel
+                                    if abs_path.exists():
+                                        image_path = str(abs_path.absolute())
+
+                        params = {
+                            "group_id": current_group_id,
+                            "content": text
+                        }
+                        if image_path:
+                            params["image"] = image_path
+                        if is_show_edit_card is not None:
+                            params["is_show_edit_card"] = int(is_show_edit_card)
+                        if tip_window_type is not None:
+                            params["tip_window_type"] = int(tip_window_type)
+                        if confirm_required is not None:
+                            params["confirm_required"] = int(confirm_required)
+
+                        try:
+                            await client._send_group_notice(**params)
+                            restore_count += 1
+                        except Exception as e:
+                            logger.error(f"恢复群公告失败: {e}")
+
+                    logger.info(f"群公告恢复完成 (共发送 {restore_count} 条)")
+
+            # 5. 恢复群成员设置 (昵称、头衔、管理员)
             if any(opt in restore_options for opt in ["群昵称", "群头衔", "群管理"]):
                 backup_members = latest_data.get("members", [])
                 if backup_members:
@@ -1236,7 +1316,7 @@ class GroupBackupPlugin(Star):
 
                     logger.info(f"群成员设置恢复完成 (共 {restore_count} 人)")
 
-            # 5. 恢复群相册
+            # 6. 恢复群相册
             if "群相册" in restore_options:
                 backup_albums = latest_data.get("albums", [])
                 backup_album_media = latest_data.get("album_media", {})

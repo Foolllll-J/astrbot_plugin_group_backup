@@ -1,22 +1,30 @@
-# 📦 QQ群备份插件
+<div align="center">
+
+# 📦 QQ 群备份插件
+
+<i>✨ 守护群内点滴，备份从未如此简单</i>
 
 ![License](https://img.shields.io/badge/license-AGPL--3.0-green?style=flat-square)
 ![Python](https://img.shields.io/badge/python-3.10+-blue?style=flat-square&logo=python&logoColor=white)
 ![AstrBot](https://img.shields.io/badge/framework-AstrBot-ff6b6b?style=flat-square)
 
-一款为 [AstrBot](https://github.com/AstrBotDevs/AstrBot) 设计的 QQ 群数据备份插件。支持备份群成员、公告、精华消息、荣誉等数据，并支持导出为 Excel 或压缩包。
+</div>
 
+## 🌟 简介
 
+一款为 [**AstrBot**](https://github.com/AstrBotDevs/AstrBot) 设计的 QQ 群数据备份插件。支持对群成员、群公告、群精华消息、群荣誉及相册等多种数据的全面监控与备份，并提供便捷的导出与恢复功能。
+
+---
 
 ## ✨ 功能特性
 
 * **📊 全面备份**: 支持备份群信息、群头像、群成员列表、群公告、群精华消息、群荣誉以及群相册。
 * **📥 灵活导出**: 支持将备份数据导出为 Excel 表格，相册数据自动打包为 ZIP 压缩包发送。
-* **🔄 数据恢复**: 支持一键恢复群名称、群头像、群成员名片及群相册。
+* **🔄 数据恢复**: 支持一键恢复群名称、群头像、群成员名片、群公告及群相册。
 * **⚖️ 权限控制**: 支持 Bot 管理员及插件配置中指定的管理员使用。
 * **🛠️ 增量更新**: 自动检测数据变化（如新成员入群、退群、群相册重命名等）并记录日志。
 
-
+---
 
 ## 📖 使用指南
 
@@ -39,7 +47,7 @@
 
 **指令**: `/群恢复 [来源群号]`
 * 在目标群中使用，将 `来源群号` 的备份数据恢复到当前群。
-* **支持恢复**: 群名称、群头像、群成员名片、群相册。
+* **支持恢复**: 群名称、群头像、群成员名片、群公告、群相册。
 
 
 ### 🗑️ 删除备份
@@ -47,12 +55,14 @@
 **指令**: `/删除群备份 [群号]`
 * 删除指定群在本地的所有备份数据。
 
-
+---
 
 ## ⚠️ 注意事项
 
-* **环境限制**: 本插件**仅适用于 NapCat** 环境。
+* **环境要求**: 本插件**仅适用于 NapCat** 环境，建议使用最新版本的 NapCat 以获得最佳兼容性。
 * **API 限制**: 受限于 NapCat API，本插件**无法备份**勾选了“发送给新成员”选项的群公告，以及**无法恢复视频**到群相册。
+
+---
 
 ## ⏰ 定时备份
 
@@ -63,6 +73,8 @@
 `/添加任务 每日群备份 0 3 * * * /群备份 123456789`
 *(每天凌晨 3 点自动备份群 123456789)*
 
+---
+
 ## 🔗 群文件备份
 
 如果您有备份群文件的需求，可以尝试以下插件：
@@ -70,23 +82,35 @@
 * 📂 [astrbot_plugin_GroupFS](https://github.com/Foolllll-J/astrbot_plugin_GroupFS): 支持备份群文件到**本地**。
 * ☁️ [astrbot_plugin_openlistfile](https://github.com/Foolllll-J/astrbot_plugin_openlistfile): 支持将文件备份到**网盘**。
 
-
+---
 
 ## 📝 更新日志
+
+* **v1.0**
+  * 新增 群公告 恢复
+  * 优化 群公告 备份与导出
 
 * **v0.2**
   * 新增 群恢复 功能
   * 优化 群导出
 
-
 * **v0.1**
   * 实现基础的备份导出功能
 
 
+---
 
 ## ❤️ 支持
 
 * [AstrBot 帮助文档](https://astrbot.app)
 * 如果您在使用中遇到问题，欢迎提交 [Issue](https://github.com/Foolllll-J/astrbot_plugin_group_backup/issues)。
+
+---
+
+<div align="center">
+
+**如果本插件对你有帮助，欢迎点个 ⭐ Star 支持一下！**
+
+</div>
 
 
