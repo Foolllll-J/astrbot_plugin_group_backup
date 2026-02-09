@@ -19,7 +19,7 @@ import shutil
     "astrbot_plugin_group_backup",
     "Foolllll",
     "群备份插件，备份群成员、公告、精华等数据",
-    "1.0",
+    "1.1",
     "https://github.com/Foolllll-J/astrbot_plugin_group_backup"
 )
 class GroupBackupPlugin(Star):
@@ -28,6 +28,11 @@ class GroupBackupPlugin(Star):
         self.config = config if config else {}
         self.plugin_data_dir = StarTools.get_data_dir("astrbot_plugin_group_backup")
         self.download_semaphore = asyncio.Semaphore(5) # 限制并发下载数
+        
+        self.admin_users = [int(u) for u in self.config.get("admin_users", [])]
+        self.backup_options = self.config.get("backup_options", ["群信息", "群头像", "群成员", "群公告", "群精华", "群相册", "群荣誉"])
+        self.restore_options = self.config.get("restore_options", ["群名称", "群头像", "群昵称", "群头衔", "群管理", "群相册"])
+        self.recall_interval = int(self.config.get("recall_interval", 60)) # 默认 60 秒
         
         # 字段映射：配置项名 -> API 返回的键名
         self.field_map = {
@@ -40,18 +45,6 @@ class GroupBackupPlugin(Star):
             "加群时间": "join_time",
             "最后发言": "last_sent_time",
         }
-
-    @property
-    def admin_users(self) -> List[int]:
-        return [int(u) for u in self.config.get("admin_users", [])]
-
-    @property
-    def backup_options(self) -> List[str]:
-        return self.config.get("backup_options", ["群信息", "群头像", "群成员", "群公告", "群精华", "群相册", "群荣誉"])
-
-    @property
-    def restore_options(self) -> List[str]:
-        return self.config.get("restore_options", ["群名称", "群头像", "群昵称", "群头衔", "群管理", "群相册"])
 
     def _format_timestamp(self, timestamp):
         """格式化时间戳"""
@@ -1410,3 +1403,191 @@ class GroupBackupPlugin(Star):
             import traceback
             logger.error(traceback.format_exc())
             yield event.plain_result(f"❌ 恢复过程中出现错误: {e}")
+
+    @filter.command("群友召回", alias={"群召回", "群友找回", "群员召回", "群员找回"})
+    async def group_recall(self, event: AstrMessageEvent):
+        """群友召回 [群等级] [群号] [消息文本] 或 [群号] [群等级] [消息文本]"""
+        # 权限检查
+        is_admin = event.is_admin()
+        sender_id = int(event.get_sender_id())
+        if not is_admin and (not self.admin_users or sender_id not in self.admin_users):
+            logger.warning(f"[GroupBackup] 用户 {sender_id} 尝试使用召回指令，但无权限。")
+            yield event.plain_result("❌ 您没有权限执行此指令。")
+            return
+
+        current_group_id = event.get_group_id()
+        if not current_group_id:
+            yield event.plain_result("❌ 请在群聊中使用此指令。")
+            return
+        current_group_id = int(current_group_id)
+
+        parts = event.message_str.strip().split()
+        if len(parts) < 3:
+            yield event.plain_result("❌ 指令格式错误。用法示例：\n/群友召回 123456789 召回消息\n/群友召回 1 123456789 @123456789 召回消息")
+            return
+
+        # parts[0] 是指令名，参数从 parts[1] 开始
+        args = parts[1:]
+
+        # 解析参数
+        level_limit = None
+        source_group_id = None
+        
+        # 尝试从前两个参数中提取等级和群号
+        arg1 = args[0]
+        arg2 = args[1] if len(args) > 1 else ""
+        
+        # 处理 arg1
+        if arg1.isdigit():
+            if len(arg1) <= 3:
+                level_limit = int(arg1)
+            else:
+                source_group_id = int(arg1)
+        
+        # 处理 arg2
+        if arg2.isdigit():
+            if len(arg2) <= 3:
+                level_limit = int(arg2)
+            else:
+                source_group_id = int(arg2)
+
+        # 验证提取结果
+        if source_group_id is None:
+            logger.error(f"[GroupBackup] 召回指令解析失败：未识别到群号。参数: {args}")
+            yield event.plain_result("❌ 未能在指令中识别出有效的群号。")
+            return
+
+        # 找到最后一个数字参数的索引，之后的全部视为消息文本
+        last_digit_idx = -1
+        if args[0].isdigit(): last_digit_idx = 0
+        if len(args) > 1 and args[1].isdigit(): last_digit_idx = 1
+        
+        full_message_text = " ".join(args[last_digit_idx + 1:])
+        if not full_message_text:
+            logger.error(f"[GroupBackup] 召回指令解析失败：消息内容为空。参数: {args}")
+            yield event.plain_result("❌ 消息内容不能为空。")
+            return
+
+        # 解析消息内容，识别 @群号
+        import re
+        recall_message_chain = [] # 存储要发送的消息链项
+        segments = re.split(r'(@\d+)', full_message_text)
+
+        client = event.bot
+        for segment in segments:
+            if not segment: continue
+            
+            if segment.startswith("@") and segment[1:].isdigit():
+                # 识别到 @群号，需要发送群名片
+                card_group_id = segment[1:]
+                
+                # 获取群名片数据
+                try:
+                    res = await client.call_action("ArkShareGroup", group_id=str(card_group_id))
+                    json_data = res
+                    if isinstance(res, str):
+                        try: json_data = json.loads(res)
+                        except: pass
+                    
+                    card_data_str = res if isinstance(res, str) else json.dumps(res, ensure_ascii=False)
+                    token = ""
+                    if isinstance(json_data, dict) and "config" in json_data:
+                        token = json_data["config"].get("token", "")
+                    
+                    recall_message_chain.append({
+                        "type": "json",
+                        "data": {
+                            "data": card_data_str,
+                            "config": {"token": token}
+                        }
+                    })
+                except Exception as e:
+                    logger.error(f"[GroupBackup] 获取群名片 {card_group_id} 失败: {e}")
+                    recall_message_chain.append({"type": "text", "data": {"text": segment}})
+            else:
+                # 普通文本
+                recall_message_chain.append({"type": "text", "data": {"text": segment}})
+
+        if not recall_message_chain:
+            yield event.plain_result("❌ 消息内容解析后为空。")
+            return
+
+        logger.info(f"[GroupBackup] 正在执行召回。来源群: {source_group_id}, 目标群: {current_group_id}, 等级限制: {level_limit}")
+
+        # 1. 加载备份数据
+        latest_data = self._get_latest_backup_data(source_group_id)
+        if not latest_data or "members" not in latest_data:
+            logger.warning(f"[GroupBackup] 召回失败：未找到来源群 {source_group_id} 的成员备份。")
+            yield event.plain_result(f"❌ 未找到群 {source_group_id} 的成员备份数据，无法执行召回。")
+            return
+
+        backup_members = latest_data["members"]
+        logger.debug(f"[GroupBackup] 从备份中加载了 {len(backup_members)} 名成员。")
+        
+        # 2. 获取当前群成员列表
+        try:
+            current_members_raw = await client.get_group_member_list(group_id=current_group_id)
+            current_member_ids = {m.get("user_id") for m in current_members_raw} if current_members_raw else set()
+            logger.debug(f"[GroupBackup] 当前群已有 {len(current_member_ids)} 名成员。")
+        except Exception as e:
+            logger.error(f"[GroupBackup] 获取当前群成员列表失败: {e}")
+            yield event.plain_result(f"❌ 获取当前群成员失败，无法执行召回过滤。")
+            return
+
+        # 3. 筛选符合条件的成员
+        targets = []
+        for m in backup_members:
+            uid = m.get("user_id")
+            if not uid: continue
+            
+            # 跳过已在新群的成员
+            if uid in current_member_ids:
+                continue
+            
+            # 等级筛选
+            if level_limit is not None:
+                m_level = m.get("level")
+                try:
+                    if m_level is not None and int(m_level) < level_limit:
+                        continue
+                except:
+                    continue
+            
+            targets.append(uid)
+
+        if not targets:
+            logger.info(f"[GroupBackup] 筛选完成，没有符合条件的召回目标。")
+            yield event.plain_result(f"✅ 筛选完毕，没有符合条件且不在本群的目标成员。")
+            return
+
+        logger.info(f"[GroupBackup] 筛选出 {len(targets)} 名目标成员。准备开始发送私聊，间隔: {self.recall_interval}s")
+        yield event.plain_result(f"🔍 筛选出 {len(targets)} 名目标成员，开始私聊召回...")
+
+        # 4. 异步执行发送任务
+        async def send_recall_messages():
+            success_count = 0
+            fail_count = 0
+            logger.info(f"[GroupBackup] 开始后台召回任务。总计: {len(targets)} 人")
+            for i, target_uid in enumerate(targets):
+                try:
+                    for msg_item in recall_message_chain:
+                        await client.send_private_msg(user_id=target_uid, message=[msg_item])
+                        await asyncio.sleep(0.2) # 同一用户的分条消息短延迟，避免乱序
+                    
+                    success_count += 1
+                except Exception as e:
+                    fail_count += 1
+                    logger.error(f"[GroupBackup] [{i+1}/{len(targets)}] 发送召回消息至 {target_uid} 失败: {e}")
+                
+                if i < len(targets) - 1:
+                    await asyncio.sleep(self.recall_interval)
+            
+            summary = f"📢 群友召回任务完成！\n成功: {success_count}\n失败: {fail_count}"
+            logger.info(f"[GroupBackup] 召回任务结束。成功: {success_count}, 失败: {fail_count}")
+            try:
+                await client.send_group_msg(group_id=current_group_id, message=summary)
+            except Exception as e:
+                logger.error(f"[GroupBackup] 发送任务总结消息失败: {e}")
+
+        # 创建后台任务
+        asyncio.create_task(send_recall_messages())

@@ -1,6 +1,6 @@
 name: astrbot_plugin_group_backup # 插件唯一识别名，以 astrbot_plugin_ 前缀开头
-display_name: QQ群备份 # 用于展示的名字
-desc: 备份 QQ 群成员、群公告、群精华、群相册等数据，支持导出及恢复。
-version: v1.0 # 插件版本号
+display_name: QQ 群备份 # 用于展示的名字
+desc: 备份 QQ 群成员、群公告、群精华、群相册等数据，支持导出恢复及群员召回。
+version: v1.1 # 插件版本号
 author: Foolllll # 作者
 repo: https://github.com/Foolllll-J/astrbot_plugin_group_backup # 插件的仓库地址
