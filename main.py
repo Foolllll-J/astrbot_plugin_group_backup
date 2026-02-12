@@ -74,7 +74,7 @@ class GroupBackupPlugin(Star):
     async def _download_file(self, url: str, save_path: Path, overwrite: bool = False):
         """下载文件，如果已存在且未开启 overwrite 则跳过"""
         if not overwrite and save_path.exists():
-            logger.info(f"文件已存在，跳过下载: {save_path}")
+            logger.debug(f"文件已存在，跳过下载: {save_path}")
             return True
         
         async with self.download_semaphore:
@@ -95,7 +95,7 @@ class GroupBackupPlugin(Star):
                             save_path.parent.mkdir(parents=True, exist_ok=True)
                             with open(save_path, "wb") as f:
                                 f.write(content)
-                            logger.info(f"成功保存文件: {save_path}")
+                            logger.debug(f"成功保存文件: {save_path}")
                             return True # 内容有变化或新下载
                         else:
                             logger.warning(f"下载文件失败 {url}: HTTP {response.status}")
@@ -149,7 +149,7 @@ class GroupBackupPlugin(Star):
         
         with open(log_file, "w", encoding="utf-8") as f:
             json.dump(logs, f, ensure_ascii=False, indent=4)
-        logger.info(f"已追加日志到 {log_file}: {log_entry}")
+        logger.debug(f"已追加日志到 {log_file}: {log_entry}")
 
     def _archive_deleted_items(self, group_id: int, item_type: str, items: List[Any]):
         """归档已删除的项目到回收站"""
@@ -176,7 +176,7 @@ class GroupBackupPlugin(Star):
             
         with open(archive_file, "w", encoding="utf-8") as f:
             json.dump(archive, f, ensure_ascii=False, indent=4)
-        logger.info(f"已归档 {len(items)} 个已删除的项目（类型: '{item_type}'）到 {archive_file}")
+        logger.debug(f"已归档 {len(items)} 个已删除的项目（类型: '{item_type}'）到 {archive_file}")
 
     async def _backup_albums(self, client, group_id: int, latest_data: Dict = None):
         """备份群相册，返回 (albums_list, album_media_map)"""
@@ -315,7 +315,7 @@ class GroupBackupPlugin(Star):
                         album_save_dir.mkdir(parents=True, exist_ok=True)
                         
                         if is_album_updated:
-                            logger.info(f"正在下载相册 {album_name} 中的 {len(media_list)} 个媒体文件...")
+                            logger.debug(f"正在下载相册 {album_name} 中的 {len(media_list)} 个媒体文件...")
                             download_tasks = []
                             for media in media_list:
                                 url = media.get("url")
@@ -660,7 +660,7 @@ class GroupBackupPlugin(Star):
                                             if src_file.exists():
                                                 dst_file = Path(self.plugin_data_dir) / str(group_id) / "logs" / "deleted_items" / "albums" / album_name / f"{m['media_id']}{ext}"
                                                 dst_file.parent.mkdir(parents=True, exist_ok=True)
-                                                logger.info(f"正在将已删除的媒体文件从 {src_file} 移动到 {dst_file}")
+                                                logger.debug(f"正在将已删除的媒体文件从 {src_file} 移动到 {dst_file}")
                                                 import shutil
                                                 shutil.move(str(src_file), str(dst_file))
                                                 break
@@ -690,7 +690,7 @@ class GroupBackupPlugin(Star):
                 save_file_path = backup_path / file_name
                 with open(save_file_path, "w", encoding="utf-8") as f:
                     json.dump(val, f, ensure_ascii=False, indent=4)
-                logger.info(f"成功保存备份快照文件: {save_file_path}")
+                logger.debug(f"成功保存备份快照文件: {save_file_path}")
             
             # 删除除当前刚创建的备份以外的所有旧快照文件夹
             all_backups = sorted([d for d in group_base_dir.iterdir() if d.is_dir() and d.name.replace("_", "").isdigit()], key=lambda x: x.name)
@@ -699,7 +699,7 @@ class GroupBackupPlugin(Star):
                     try:
                         import shutil
                         shutil.rmtree(str(old_backup))
-                        logger.info(f"已清理旧备份快照: {old_backup.name}")
+                        logger.debug(f"已清理旧备份快照: {old_backup.name}")
                     except Exception as e:
                         logger.error(f"清理旧备份失败 {old_backup.name}: {e}")
             
@@ -1305,8 +1305,7 @@ class GroupBackupPlugin(Star):
                         
                         restore_count += 1
                         if restore_count % 10 == 0:
-                            logger.info(f"已恢复 {restore_count} 名成员的设置...")
-
+                            logger.debug(f"已恢复 {restore_count} 名成员的设置...")
                     logger.info(f"群成员设置恢复完成 (共 {restore_count} 人)")
 
             # 6. 恢复群相册
@@ -1390,7 +1389,7 @@ class GroupBackupPlugin(Star):
                                     )
                                     upload_count += 1
                                     if upload_count % 5 == 0:
-                                        logger.info(f"相册 '{album_name}' 已上传 {upload_count} 个文件...")
+                                        logger.debug(f"相册 '{album_name}' 已上传 {upload_count} 个文件...")
                                 except Exception as e:
                                     logger.error(f"上传文件 {local_file} 到相册失败: {e}")
 
