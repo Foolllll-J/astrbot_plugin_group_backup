@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import shutil
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
@@ -83,7 +82,7 @@ async def backup_albums(
     album_media_map: Dict[str, List[Dict[str, Any]]] = {}
     backup_ok = True
     try:
-        raw_albums = await client.get_qun_album_list(group_id=str(group_id))
+        raw_albums = await plugin._get_group_album_list(client, group_id)
         if isinstance(raw_albums, dict) and raw_albums.get("retcode", 0) != 0:
             raise Exception(f"API 响应异常: {raw_albums}")
         raw_albums = normalize_album_list_response(raw_albums)

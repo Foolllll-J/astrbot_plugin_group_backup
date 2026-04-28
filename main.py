@@ -1,19 +1,10 @@
-import os
-import json
 import asyncio
-import pandas as pd
-import aiohttp
 from datetime import datetime
-from io import BytesIO
 from pathlib import Path
 from typing import List, Dict, Any, Optional
 from astrbot.api.event import filter, AstrMessageEvent
-from astrbot.api.star import Context, Star, StarTools, register
+from astrbot.api.star import Context, Star, StarTools
 from astrbot.api import logger
-from astrbot.core.platform.message_type import MessageType
-import base64
-import zipfile
-import shutil
 from .modules.album_service import (
     backup_albums as backup_albums_service,
     normalize_album_list_response,
@@ -48,6 +39,27 @@ class GroupBackupPlugin(Star):
             "加群时间": "join_time",
             "最后发言": "last_sent_time",
         }
+        self._is_llbot = False
+
+    async def initialize(self) -> None:
+        try:
+            platform = self.context.get_platform_inst("aiocqhttp")
+            if platform is None:
+                platform = self.context.get_platform(filter.PlatformAdapterType.AIOCQHTTP)
+            if platform is None:
+                logger.debug("[group_backup] 启动时未找到 aiocqhttp 平台，跳过协议端探测")
+                return
+
+            version_info = await platform.get_client().get_version_info()
+            app_name = version_info.get("app_name") if isinstance(version_info, dict) else None
+            self._is_llbot = app_name == "LLOneBot"
+            logger.info(
+                f"[group_backup] 协议端探测结果: app_name={app_name or 'unknown'}, "
+                f"backend={'llbot' if self._is_llbot else 'napcat'}"
+            )
+        except Exception as e:
+            self._is_llbot = False
+            logger.warning(f"[group_backup] 启动时探测协议端失败，默认按 NapCat 处理: {e}")
 
     def _format_timestamp(self, timestamp):
         """格式化时间戳"""
@@ -60,6 +72,15 @@ class GroupBackupPlugin(Star):
 
     def _normalize_album_media_response(self, payload: Any) -> List[Dict[str, Any]]:
         return normalize_album_media_response(payload)
+
+    async def _get_group_album_list(self, client, group_id: int | str):
+        if self._is_llbot:
+            api = getattr(client, "api", None)
+            if api is None:
+                raise RuntimeError("llbot client.api 不可用，无法获取群相册列表")
+            result = await api.call_action("get_group_album_list", group_id=str(group_id))
+            return result
+        return await client.get_qun_album_list(group_id=str(group_id))
 
     def _format_essence_content(self, raw_content):
         """格式化精华消息内容"""

@@ -1,13 +1,26 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 from pathlib import Path
 
 from astrbot.api import logger
-from astrbot.core.platform.message_type import MessageType
 
 from .album_service import sort_backup_album_media
+
+
+def _unwrap_list_payload(payload):
+    if isinstance(payload, dict) and "data" in payload and isinstance(payload.get("data"), list):
+        return payload["data"]
+    return payload
+
+
+def _file_to_base64_uri(file_path: str) -> str:
+    raw = Path(file_path).read_bytes()
+    b64 = base64.b64encode(raw).decode("ascii")
+    return f"base64://{b64}"
+
 
 async def group_restore_command(plugin, event: AstrMessageEvent, group_id_arg: str = ""):
     """群恢复 [群号]：将指定群或当前群的备份数据恢复到当前群"""
@@ -52,13 +65,7 @@ async def group_restore_command(plugin, event: AstrMessageEvent, group_id_arg: s
 
         # 3. 恢复群头像
         if "群头像" in restore_options:
-            # 尝试从备份目录查找头像文件，优先找 group_avatar.png
             avatar_path = Path(plugin.plugin_data_dir) / str(source_group_id) / "group_avatar.png"
-            if not avatar_path.exists():
-                avatar_path = Path(plugin.plugin_data_dir) / str(source_group_id) / "avatar.png"
-            if not avatar_path.exists():
-                avatar_path = Path(plugin.plugin_data_dir) / str(source_group_id) / "avatar.jpg"
-
             if avatar_path.exists():
                 logger.info(f"正在恢复群头像: {avatar_path}")
                 await client.set_group_portrait(group_id=current_group_id, file=f"file://{avatar_path.absolute()}")
@@ -84,12 +91,11 @@ async def group_restore_command(plugin, event: AstrMessageEvent, group_id_arg: s
 
                     settings = n.get("settings", {}) or {}
                     is_show_edit_card = settings.get("is_show_edit_card")
+                    tip_window = settings.get("tip_window")
                     tip_window_type = settings.get("tip_window_type")
                     confirm_required = settings.get("confirm_required")
-
-                    # 旧版 NapCat 没有 settings 字段，默认视为不需要确认
-                    if confirm_required is None:
-                        confirm_required = 0
+                    pinned = settings.get("pinned")
+                    send_new_member = settings.get("send_new_member")
 
                     image_path = None
                     images = n.get("images") or []
@@ -108,17 +114,65 @@ async def group_restore_command(plugin, event: AstrMessageEvent, group_id_arg: s
                     }
                     if image_path:
                         params["image"] = image_path
-                    if is_show_edit_card is not None:
-                        params["is_show_edit_card"] = int(is_show_edit_card)
-                    if tip_window_type is not None:
-                        params["tip_window_type"] = int(tip_window_type)
-                    if confirm_required is not None:
-                        params["confirm_required"] = int(confirm_required)
+                    if plugin._is_llbot:
+                        if pinned is not None:
+                            params["pinned"] = bool(pinned)
+                        if is_show_edit_card is not None:
+                            params["is_show_edit_card"] = bool(is_show_edit_card)
+                        if tip_window is None and tip_window_type is not None:
+                            tip_window = tip_window_type == 0
+                        if tip_window is not None:
+                            params["tip_window"] = bool(tip_window)
+                        if confirm_required is not None:
+                            params["confirm_required"] = bool(confirm_required)
+                        if send_new_member is not None:
+                            params["send_new_member"] = bool(send_new_member)
+                        if image_path:
+                            params["image"] = Path(image_path).resolve().as_uri()
+                    else:
+                        # 旧版 NapCat 没有 settings 字段，默认视为不需要确认
+                        if confirm_required is None:
+                            confirm_required = 0
+                        if is_show_edit_card is not None:
+                            params["is_show_edit_card"] = int(is_show_edit_card)
+                        if tip_window_type is not None:
+                            params["tip_window_type"] = int(tip_window_type)
+                        if confirm_required is not None:
+                            params["confirm_required"] = int(confirm_required)
+                        if pinned is not None:
+                            params["pinned"] = bool(pinned)
 
                     try:
                         await client._send_group_notice(**params)
                         restore_count += 1
                     except Exception as e:
+                        if plugin._is_llbot and image_path:
+                            retry_params = dict(params)
+                            try:
+                                retry_params["image"] = _file_to_base64_uri(image_path)
+                                await client._send_group_notice(**retry_params)
+                                restore_count += 1
+                                logger.warning(
+                                    "[group_backup] llbot 公告图片 file:// 上传失败，已回退 base64:// 并发送成功: %s",
+                                    e,
+                                )
+                                continue
+                            except Exception as e2:
+                                # 最后降级：保留文本公告，避免整条公告恢复失败
+                                text_only_params = dict(params)
+                                text_only_params.pop("image", None)
+                                try:
+                                    await client._send_group_notice(**text_only_params)
+                                    restore_count += 1
+                                    logger.warning(
+                                        "[group_backup] llbot 公告图片上传失败，已降级为纯文本公告: file_error=%s, base64_error=%s",
+                                        e,
+                                        e2,
+                                    )
+                                    continue
+                                except Exception as e3:
+                                    logger.error(f"恢复群公告失败: file={e}; base64={e2}; text_only={e3}")
+                                    continue
                         logger.error(f"恢复群公告失败: {e}")
 
                 logger.info(f"群公告恢复完成 (共发送 {restore_count} 条)")
@@ -129,6 +183,8 @@ async def group_restore_command(plugin, event: AstrMessageEvent, group_id_arg: s
             if backup_members:
                 # 获取当前群成员列表
                 current_members_raw = await client.get_group_member_list(group_id=current_group_id)
+                if plugin._is_llbot:
+                    current_members_raw = _unwrap_list_payload(current_members_raw)
                 current_member_ids = {m.get("user_id") for m in current_members_raw} if current_members_raw else set()
 
                 restore_count = 0
@@ -142,8 +198,9 @@ async def group_restore_command(plugin, event: AstrMessageEvent, group_id_arg: s
                         await client.set_group_card(group_id=current_group_id, user_id=user_id, card=bm["card"])
 
                     # 恢复群头衔
-                    if "群头衔" in restore_options and "special_title" in bm:
-                        await client.set_group_special_title(group_id=current_group_id, user_id=user_id, special_title=bm["special_title"])
+                    special_title = bm.get("special_title", bm.get("title"))
+                    if "群头衔" in restore_options and special_title is not None:
+                        await client.set_group_special_title(group_id=current_group_id, user_id=user_id, special_title=special_title)
 
                     # 恢复群管理
                     if "群管理" in restore_options and "role" in bm:
@@ -164,7 +221,9 @@ async def group_restore_command(plugin, event: AstrMessageEvent, group_id_arg: s
             if backup_albums:
                 # 获取当前群相册列表，用于比对同名相册
                 try:
-                    current_albums = plugin._normalize_album_list_response(await client.get_qun_album_list(group_id=str(current_group_id)))
+                    current_albums = plugin._normalize_album_list_response(
+                        await plugin._get_group_album_list(client, current_group_id)
+                    )
                 except:
                     current_albums = []
 
@@ -211,27 +270,37 @@ async def group_restore_command(plugin, event: AstrMessageEvent, group_id_arg: s
 
                     upload_count = 0
                     for m in media_list:
-                        # 仅支持图片恢复，跳过视频 (media_type == 1)
-                        if m.get("media_type") != 0:
+                        media_type = m.get("media_type")
+                        if not plugin._is_llbot and media_type != 0:
                             continue
 
                         m_id = str(m.get("media_id"))
                         if m_id in existing_media_ids:
-                            # logger.debug(f"跳过已存在媒体: {m_id}")
                             continue
 
-                        file_ext = ".jpg" 
+                        file_ext = ".mp4" if media_type == 1 else ".jpg"
                         local_file = album_path / f"{m_id}{file_ext}"
 
                         if local_file.exists():
                             try:
                                 # 调用上传 API
-                                await client.upload_image_to_qun_album(
-                                    group_id=str(current_group_id),
-                                    album_id=target_album_id,
-                                    album_name=album_name,
-                                    file=f"file://{local_file.absolute()}"
-                                )
+                                if plugin._is_llbot:
+                                    api = getattr(client, "api", None)
+                                    if api is None:
+                                        raise RuntimeError("llbot client.api 不可用，无法上传群相册")
+                                    await api.call_action(
+                                        "upload_group_album",
+                                        group_id=str(current_group_id),
+                                        album_id=str(target_album_id),
+                                        files=[local_file.resolve().as_uri()],
+                                    )
+                                else:
+                                    await client.upload_image_to_qun_album(
+                                        group_id=str(current_group_id),
+                                        album_id=target_album_id,
+                                        album_name=album_name,
+                                        file=f"file://{local_file.absolute()}"
+                                    )
                                 upload_count += 1
                                 if upload_count % 20 == 0:
                                     logger.debug(f"相册 '{album_name}' 上传进度: {upload_count} 个文件")
@@ -324,6 +393,10 @@ async def group_recall_command(plugin, event: AstrMessageEvent):
         if segment.startswith("@") and segment[1:].isdigit():
             # 识别到 @群号，需要发送群名片
             card_group_id = segment[1:]
+            if plugin._is_llbot:
+                cq_group_card = f"[CQ:contact,type=group,id={card_group_id}]"
+                recall_message_chain.append({"type": "text", "data": {"text": cq_group_card}})
+                continue
 
             # 获取群名片数据
             try:
@@ -371,6 +444,8 @@ async def group_recall_command(plugin, event: AstrMessageEvent):
     # 2. 获取当前群成员列表
     try:
         current_members_raw = await client.get_group_member_list(group_id=current_group_id)
+        if plugin._is_llbot:
+            current_members_raw = _unwrap_list_payload(current_members_raw)
         current_member_ids = {m.get("user_id") for m in current_members_raw} if current_members_raw else set()
         logger.debug(f"[GroupBackup] 当前群已有 {len(current_member_ids)} 名成员。")
     except Exception as e:
@@ -414,9 +489,26 @@ async def group_recall_command(plugin, event: AstrMessageEvent):
         logger.info(f"[GroupBackup] 开始后台召回任务。总计: {len(targets)} 人")
         for i, target_uid in enumerate(targets):
             try:
-                for msg_item in recall_message_chain:
-                    await client.send_private_msg(user_id=target_uid, message=[msg_item])
-                    await asyncio.sleep(0.2) # 同一用户的分条消息短延迟，避免乱序
+                if plugin._is_llbot:
+                    api = getattr(client, "api", None)
+                    for msg_item in recall_message_chain:
+                        raw_text = str((msg_item.get("data") or {}).get("text", ""))
+                        if not raw_text:
+                            continue
+                        if api is not None and hasattr(api, "call_action"):
+                            await api.call_action(
+                                "send_private_msg",
+                                user_id=int(target_uid),
+                                message=raw_text,
+                                auto_escape=False,
+                            )
+                        else:
+                            await client.send_private_msg(user_id=target_uid, message=raw_text)
+                        await asyncio.sleep(0.2) # 同一用户的分条消息短延迟，避免乱序
+                else:
+                    for msg_item in recall_message_chain:
+                        await client.send_private_msg(user_id=target_uid, message=[msg_item])
+                        await asyncio.sleep(0.2)
 
                 success_count += 1
             except Exception as e:

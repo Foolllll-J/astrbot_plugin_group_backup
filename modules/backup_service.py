@@ -6,6 +6,33 @@ from pathlib import Path
 
 from astrbot.api import logger
 
+
+def _normalize_group_detail_for_llbot(raw_detail: dict) -> dict:
+    if not isinstance(raw_detail, dict):
+        return {}
+    data = raw_detail.get("data")
+    if not isinstance(data, dict):
+        data = raw_detail
+    return {
+        "groupCode": data.get("group_id"),
+        "groupName": data.get("group_name"),
+        "ownerUin": data.get("owner_id"),
+        "memberNum": data.get("member_count"),
+        "maxMemberNum": data.get("max_member_count"),
+        "groupCreateTime": data.get("group_create_time"),
+        "activeMemberNum": data.get("active_member_count"),
+        "groupGrade": data.get("group_memo"),
+        "group_all_shut": data.get("shut_up_all_timestamp"),
+        "groupClassText": data.get("remark_name"),
+    }
+
+
+def _unwrap_list_payload(payload):
+    if isinstance(payload, dict) and "data" in payload and isinstance(payload.get("data"), list):
+        return payload["data"]
+    return payload
+
+
 async def group_backup_command(plugin, event: AstrMessageEvent, group_id_arg: str = ""):
     """群备份 [群号]：备份当前群或指定群数据到本地 JSON"""
     # 权限检查：Bot 管理员 或 配置项中的管理员
@@ -36,15 +63,19 @@ async def group_backup_command(plugin, event: AstrMessageEvent, group_id_arg: st
         group_detail = {}
         if "群信息" in plugin.backup_options:
             try:
-                raw_detail = await client.get_group_detail_info(group_id=group_id)
+                if plugin._is_llbot:
+                    raw_detail = await client.get_group_info(group_id=group_id)
+                    group_detail = _normalize_group_detail_for_llbot(raw_detail)
+                else:
+                    raw_detail = await client.get_group_detail_info(group_id=group_id)
 
-                # 精简群详细信息
-                essential_detail_keys = [
-                    "groupCode", "groupName", "ownerUin", "memberNum", "maxMemberNum", 
-                    "groupCreateTime", "activeMemberNum", "groupGrade",
-                    "group_all_shut", "groupClassText"
-                ]
-                group_detail = {k: raw_detail.get(k) for k in essential_detail_keys if k in raw_detail}
+                    # 精简群详细信息
+                    essential_detail_keys = [
+                        "groupCode", "groupName", "ownerUin", "memberNum", "maxMemberNum",
+                        "groupCreateTime", "activeMemberNum", "groupGrade",
+                        "group_all_shut", "groupClassText"
+                    ]
+                    group_detail = {k: raw_detail.get(k) for k in essential_detail_keys if k in raw_detail}
 
             except Exception as e:
                 logger.warning(f"获取群信息失败: {e}")
@@ -96,6 +127,8 @@ async def group_backup_command(plugin, event: AstrMessageEvent, group_id_arg: st
         members = []
         if "群成员" in plugin.backup_options:
             raw_members = await client.get_group_member_list(group_id=group_id)
+            if plugin._is_llbot:
+                raw_members = _unwrap_list_payload(raw_members)
             essential_keys = ["user_id", "nickname", "card", "role", "level", "title", "join_time", "last_sent_time"]
             for m in raw_members:
                 members.append({k: m.get(k) for k in essential_keys if k in m})
@@ -124,6 +157,8 @@ async def group_backup_command(plugin, event: AstrMessageEvent, group_id_arg: st
         if "群公告" in plugin.backup_options:
             try:
                 raw_notices = await client._get_group_notice(group_id=group_id)
+                if plugin._is_llbot:
+                    raw_notices = _unwrap_list_payload(raw_notices)
 
                 # 精简公告信息
                 for n in raw_notices:
@@ -137,8 +172,11 @@ async def group_backup_command(plugin, event: AstrMessageEvent, group_id_arg: st
                             "read_num": n.get("read_num"),
                             "settings": {
                                 "is_show_edit_card": settings.get("is_show_edit_card"),
+                                "tip_window": settings.get("tip_window"),
                                 "tip_window_type": settings.get("tip_window_type"),
-                                "confirm_required": settings.get("confirm_required")
+                                "confirm_required": settings.get("confirm_required"),
+                                "pinned": settings.get("pinned"),
+                                "send_new_member": settings.get("send_new_member"),
                             }
                         }
                     # 解析图片信息
@@ -153,11 +191,13 @@ async def group_backup_command(plugin, event: AstrMessageEvent, group_id_arg: st
                             if isinstance(img, dict):
                                 img_id = img.get("id")
                                 size = "628"
-                                img_url = f"https://gdynamic.qpic.cn/gdynamic/{img_id}/{size}"
+                                img_url = img.get("url") if plugin._is_llbot else None
+                                if not img_url:
+                                    img_url = f"https://gdynamic.qpic.cn/gdynamic/{img_id}/{size}"
 
                                 img["url"] = img_url
                                 # 备份图片到本地
-                                ext = ".jpg" 
+                                ext = ".jpg"
                                 local_path = notice_img_dir / f"{img_id}{ext}"
                                 success = await plugin._download_file(img_url, local_path)
                                 if success:
@@ -265,11 +305,22 @@ async def group_backup_command(plugin, event: AstrMessageEvent, group_id_arg: st
         # 6. 获取群相册并备份原图
         albums = []
         album_media_map = {}
+        albums_backup_ok = True
         if "群相册" in plugin.backup_options:
             albums, album_media_map, albums_backup_ok = await plugin._backup_albums(client, group_id, latest_data)
+            if not albums_backup_ok:
+                logger.warning("群相册备份遇到问题，已跳过相册数据的保存和增量对比。")
+                if latest_data:
+                    albums = latest_data.get("albums", albums)
+                    album_media_map = latest_data.get("album_media", album_media_map)
 
         # 7. 增量对比群相册（处理已删除的图片/相册）
-        if "群相册" in plugin.backup_options and latest_data and "album_media" in latest_data:
+        if (
+            "群相册" in plugin.backup_options
+            and albums_backup_ok
+            and latest_data
+            and "album_media" in latest_data
+        ):
             try:
                 old_album_media = latest_data["album_media"]
                 # 查找已删除的相册
@@ -301,8 +352,8 @@ async def group_backup_command(plugin, event: AstrMessageEvent, group_id_arg: st
                             plugin._archive_deleted_items(group_id, "media", deleted_media)
                             for m in deleted_media:
                                 plugin._append_log(group_id, "content_changes", {
-                                    "type": "媒体文件已删除", 
-                                    "album_id": old_album_id, 
+                                    "type": "媒体文件已删除",
+                                    "album_id": old_album_id,
                                     "media_id": m["media_id"]
                                 })
 

@@ -12,6 +12,30 @@ import pandas as pd
 from astrbot.api import logger
 from astrbot.core.platform.message_type import MessageType
 
+
+def _unwrap_list_payload(payload):
+    if isinstance(payload, dict) and "data" in payload and isinstance(payload.get("data"), list):
+        return payload["data"]
+    return payload
+
+
+def _normalize_group_detail_for_llbot(raw_detail: dict) -> dict:
+    if not isinstance(raw_detail, dict):
+        return {}
+    data = raw_detail.get("data")
+    if not isinstance(data, dict):
+        data = raw_detail
+    return {
+        "groupCode": data.get("group_id"),
+        "groupName": data.get("group_name"),
+        "ownerUin": data.get("owner_id"),
+        "memberNum": data.get("member_count"),
+        "maxMemberNum": data.get("max_member_count"),
+        "activeMemberNum": data.get("active_member_count"),
+        "groupClassText": data.get("remark_name"),
+    }
+
+
 async def group_export_command(plugin, event: AstrMessageEvent, args: str = ""):
     """群导出 [群号] [选项...]：导出指定数据。选项可选：群信息、群成员、群公告、群精华、群荣誉、群相册"""
     # 权限检查
@@ -117,10 +141,14 @@ async def group_export_command(plugin, event: AstrMessageEvent, args: str = ""):
                 if "群信息" in requested_options:
                     detail = {}
                     try:
-                        raw_res = await client.get_group_detail_info(group_id=group_id)
-                        if isinstance(raw_res, dict) and raw_res.get("retcode", 0) != 0:
-                            raise Exception(f"API 响应异常: {raw_res}")
-                        detail = raw_res
+                        if plugin._is_llbot:
+                            raw_res = await client.get_group_info(group_id=group_id)
+                            detail = _normalize_group_detail_for_llbot(raw_res)
+                        else:
+                            raw_res = await client.get_group_detail_info(group_id=group_id)
+                            if isinstance(raw_res, dict) and raw_res.get("retcode", 0) != 0:
+                                raise Exception(f"API 响应异常: {raw_res}")
+                            detail = raw_res
                     except Exception as e:
                         logger.warning(f"获取实时群概况失败，尝试使用备份数据: {e}")
                         detail = latest_data.get("group_detail", {})
@@ -143,7 +171,9 @@ async def group_export_command(plugin, event: AstrMessageEvent, args: str = ""):
                     members = []
                     try:
                         raw_res = await client.get_group_member_list(group_id=group_id)
-                        if isinstance(raw_res, dict) and raw_res.get("retcode", 0) != 0:
+                        if plugin._is_llbot:
+                            raw_res = _unwrap_list_payload(raw_res)
+                        elif isinstance(raw_res, dict) and raw_res.get("retcode", 0) != 0:
                             raise Exception(f"API 响应异常: {raw_res}")
                         members = raw_res
                     except Exception as e:
@@ -169,7 +199,9 @@ async def group_export_command(plugin, event: AstrMessageEvent, args: str = ""):
                     notices = []
                     try:
                         raw_res = await client._get_group_notice(group_id=group_id)
-                        if isinstance(raw_res, dict) and raw_res.get("retcode", 0) != 0:
+                        if plugin._is_llbot:
+                            raw_res = _unwrap_list_payload(raw_res)
+                        elif isinstance(raw_res, dict) and raw_res.get("retcode", 0) != 0:
                             raise Exception(f"API 响应异常: {raw_res}")
                         notices = raw_res
                     except Exception as e:
@@ -180,12 +212,12 @@ async def group_export_command(plugin, event: AstrMessageEvent, args: str = ""):
                         processed_notices = []
                         for n in notices:
                             msg = n.get("message", {})
-                            content = msg.get("text", "")
+                            content = msg.get("text", "") if isinstance(msg, dict) else n.get("text", "")
 
                             if content:
                                 content = content.replace("&#10;", "\n").replace("&nbsp;", " ")
 
-                            images = msg.get("image") or msg.get("images")
+                            images = (msg.get("image") or msg.get("images")) if isinstance(msg, dict) else n.get("images")
                             if images:
                                 if not isinstance(images, list):
                                     images = [images]
@@ -203,8 +235,11 @@ async def group_export_command(plugin, event: AstrMessageEvent, args: str = ""):
 
                             settings = n.get("settings", {})
                             is_show_edit_card = settings.get("is_show_edit_card")
+                            tip_window = settings.get("tip_window")
                             tip_window_type = settings.get("tip_window_type")
                             confirm_required = settings.get("confirm_required")
+                            pinned = settings.get("pinned")
+                            send_new_member = settings.get("send_new_member")
                             read_num = n.get("read_num")
 
                             notice_data = {
@@ -216,11 +251,17 @@ async def group_export_command(plugin, event: AstrMessageEvent, args: str = ""):
                             if read_num is not None:
                                 notice_data["已读人数"] = read_num
                             if is_show_edit_card is not None:
-                                notice_data["引导改名片"] = "是" if is_show_edit_card == 1 else "否"
-                            if tip_window_type is not None:
-                                notice_data["弹窗展示"] = "是" if tip_window_type == 0 else "否"
+                                notice_data["引导改名片"] = "是" if bool(is_show_edit_card) else "否"
+                            if tip_window is None and tip_window_type is not None:
+                                tip_window = tip_window_type == 0
+                            if tip_window is not None:
+                                notice_data["弹窗展示"] = "是" if bool(tip_window) else "否"
                             if confirm_required is not None:
-                                notice_data["需要确认"] = "是" if confirm_required == 1 else "否"
+                                notice_data["需要确认"] = "是" if bool(confirm_required) else "否"
+                            if pinned is not None:
+                                notice_data["是否置顶"] = "是" if bool(pinned) else "否"
+                            if send_new_member is not None:
+                                notice_data["发送给新成员"] = "是" if bool(send_new_member) else "否"
 
                             processed_notices.append(notice_data)
                         if processed_notices:
@@ -231,7 +272,9 @@ async def group_export_command(plugin, event: AstrMessageEvent, args: str = ""):
                     essence = []
                     try:
                         raw_res = await client.get_essence_msg_list(group_id=group_id)
-                        if isinstance(raw_res, dict) and raw_res.get("retcode", 0) != 0:
+                        if plugin._is_llbot:
+                            raw_res = _unwrap_list_payload(raw_res)
+                        elif isinstance(raw_res, dict) and raw_res.get("retcode", 0) != 0:
                             raise Exception(f"API 响应异常: {raw_res}")
                         essence = raw_res
                     except Exception as e:
@@ -279,16 +322,16 @@ async def group_export_command(plugin, event: AstrMessageEvent, args: str = ""):
 
                             if isinstance(honor_data, dict) and "user_id" in honor_data:
                                 honor_list.append({
-                                    "荣誉类型": type_name, 
-                                    "QQ号": honor_data.get("user_id"), 
+                                    "荣誉类型": type_name,
+                                    "QQ号": honor_data.get("user_id"),
                                     "昵称": honor_data.get("nickname"),
                                     "描述": honor_data.get("description", "")
                                 })
                             elif isinstance(honor_data, list):
                                 for h in honor_data:
                                     honor_list.append({
-                                        "荣誉类型": type_name, 
-                                        "QQ号": h.get("user_id"), 
+                                        "荣誉类型": type_name,
+                                        "QQ号": h.get("user_id"),
                                         "昵称": h.get("nickname"),
                                         "描述": h.get("description", "")
                                     })
@@ -299,7 +342,7 @@ async def group_export_command(plugin, event: AstrMessageEvent, args: str = ""):
                 if "群相册" in requested_options:
                     albums_list = []
                     try:
-                        raw_res = await client.get_qun_album_list(group_id=str(group_id))
+                        raw_res = await plugin._get_group_album_list(client, group_id)
                         if isinstance(raw_res, dict) and raw_res.get("retcode", 0) != 0:
                             raise Exception(f"API 响应异常: {raw_res}")
                         albums_list = plugin._normalize_album_list_response(raw_res)
