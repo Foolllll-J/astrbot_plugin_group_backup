@@ -37,6 +37,23 @@ async def group_restore_command(plugin, event: AstrMessageEvent, group_id_arg: s
         return
     current_group_id = int(current_group_id)
 
+    bot_role = "member"
+    try:
+        bot_info = await event.bot.get_group_member_info(
+            group_id=current_group_id,
+            user_id=int(event.get_self_id())
+        )
+        bot_role = bot_info.get("role", "member")
+        logger.info(f"[group_restore] Bot 在群 {current_group_id} 中的身份为: {bot_role}")
+
+        if bot_role == "member":
+            yield event.plain_result(
+                "❌ Bot 在群中权限不足，需要管理员以上权限才能执行恢复操作。"
+            )
+            return
+    except Exception as e:
+        logger.warning(f"[group_restore] 获取 Bot 群身份失败: {e}，继续执行恢复。")
+
     # 确定备份来源群号
     source_group_id = int(group_id_arg) if group_id_arg and group_id_arg.isdigit() else current_group_id
 
@@ -197,10 +214,13 @@ async def group_restore_command(plugin, event: AstrMessageEvent, group_id_arg: s
                     if "群昵称" in restore_options and "card" in bm:
                         await client.set_group_card(group_id=current_group_id, user_id=user_id, card=bm["card"])
 
-                    # 恢复群头衔
+                    # 恢复群头衔 (仅群主可设置)
                     special_title = bm.get("special_title", bm.get("title"))
                     if "群头衔" in restore_options and special_title is not None:
-                        await client.set_group_special_title(group_id=current_group_id, user_id=user_id, special_title=special_title)
+                        if bot_role == "owner":
+                            await client.set_group_special_title(group_id=current_group_id, user_id=user_id, special_title=special_title)
+                        else:
+                            logger.debug(f"Bot 非群主，跳过用户 {user_id} 的群头衔恢复")
 
                     # 恢复群管理
                     if "群管理" in restore_options and "role" in bm:
@@ -245,20 +265,36 @@ async def group_restore_command(plugin, event: AstrMessageEvent, group_id_arg: s
 
                     # 获取目标相册已有的媒体列表，避免重复上传
                     try:
-                        target_media_raw = await client.get_group_album_media_list(group_id=str(current_group_id), album_id=target_album_id)
-
+                        # 分页获取目标相册已有媒体
                         existing_media_ids = set()
+                        attach_info = None
+                        while True:
+                            target_media_raw = await client.get_group_album_media_list(
+                                group_id=str(current_group_id),
+                                album_id=target_album_id,
+                                attach_info=attach_info,
+                            )
 
-                        # 如果返回的是字典且包含列表字段，尝试提取
-                        media_items = []
-                        media_items = plugin._normalize_album_media_response(target_media_raw)
+                            media_items = plugin._normalize_album_media_response(target_media_raw)
 
-                        for m in media_items:
-                            # 尝试提取各种可能的 ID
-                            mid = m.get("media_id") or m.get("id")
-                            if not mid and m.get("image"): mid = m.get("image", {}).get("lloc")
-                            if not mid and m.get("video"): mid = m.get("video", {}).get("id")
-                            if mid: existing_media_ids.add(str(mid))
+                            for m in media_items:
+                                mid = m.get("media_id") or m.get("id")
+                                if not mid and m.get("image"): mid = m.get("image", {}).get("lloc")
+                                if not mid and m.get("video"): mid = m.get("video", {}).get("id")
+                                if mid: existing_media_ids.add(str(mid))
+
+                            # 检查是否还有更多分页
+                            if isinstance(target_media_raw, dict):
+                                next_has_more = target_media_raw.get("next_has_more", target_media_raw.get("data", {}).get("next_has_more", False))
+                                next_attach_info = target_media_raw.get("next_attach_info", target_media_raw.get("data", {}).get("next_attach_info"))
+                            else:
+                                next_has_more = False
+                                next_attach_info = None
+                            if not next_has_more:
+                                break
+                            attach_info = next_attach_info
+                            if not attach_info:
+                                break
                     except Exception as e:
                         logger.error(f"获取相册媒体列表失败: {e}")
                         existing_media_ids = set()
@@ -324,7 +360,7 @@ async def group_recall_command(plugin, event: AstrMessageEvent):
     is_admin = event.is_admin()
     sender_id = int(event.get_sender_id())
     if not is_admin and (not plugin.admin_users or sender_id not in plugin.admin_users):
-        logger.warning(f"[GroupBackup] 用户 {sender_id} 尝试使用召回指令，但无权限。")
+        logger.warning(f"用户 {sender_id} 尝试使用召回指令，但无权限。")
         yield event.plain_result("❌ 您没有权限执行此指令。")
         return
 
@@ -366,7 +402,7 @@ async def group_recall_command(plugin, event: AstrMessageEvent):
 
     # 验证提取结果
     if source_group_id is None:
-        logger.error(f"[GroupBackup] 召回指令解析失败：未识别到群号。参数: {args}")
+        logger.error(f"召回指令解析失败：未识别到群号。参数: {args}")
         yield event.plain_result("❌ 未能在指令中识别出有效的群号。")
         return
 
@@ -377,7 +413,7 @@ async def group_recall_command(plugin, event: AstrMessageEvent):
 
     full_message_text = " ".join(args[last_digit_idx + 1:])
     if not full_message_text:
-        logger.error(f"[GroupBackup] 召回指令解析失败：消息内容为空。参数: {args}")
+        logger.error(f"召回指令解析失败：消息内容为空。参数: {args}")
         yield event.plain_result("❌ 消息内容不能为空。")
         return
 
@@ -419,7 +455,7 @@ async def group_recall_command(plugin, event: AstrMessageEvent):
                     }
                 })
             except Exception as e:
-                logger.error(f"[GroupBackup] 获取群名片 {card_group_id} 失败: {e}")
+                logger.error(f"获取群名片 {card_group_id} 失败: {e}")
                 recall_message_chain.append({"type": "text", "data": {"text": segment}})
         else:
             # 普通文本
@@ -429,17 +465,17 @@ async def group_recall_command(plugin, event: AstrMessageEvent):
         yield event.plain_result("❌ 消息内容解析后为空。")
         return
 
-    logger.info(f"[GroupBackup] 正在执行召回。来源群: {source_group_id}, 目标群: {current_group_id}, 等级限制: {level_limit}")
+    logger.info(f"正在执行召回。来源群: {source_group_id}, 目标群: {current_group_id}, 等级限制: {level_limit}")
 
     # 1. 加载备份数据
     latest_data = plugin._get_latest_backup_data(source_group_id)
     if not latest_data or "members" not in latest_data:
-        logger.warning(f"[GroupBackup] 召回失败：未找到来源群 {source_group_id} 的成员备份。")
+        logger.warning(f"召回失败：未找到来源群 {source_group_id} 的成员备份。")
         yield event.plain_result(f"❌ 未找到群 {source_group_id} 的成员备份数据，无法执行召回。")
         return
 
     backup_members = latest_data["members"]
-    logger.debug(f"[GroupBackup] 从备份中加载了 {len(backup_members)} 名成员。")
+    logger.debug(f"从备份中加载了 {len(backup_members)} 名成员。")
 
     # 2. 获取当前群成员列表
     try:
@@ -447,9 +483,9 @@ async def group_recall_command(plugin, event: AstrMessageEvent):
         if plugin._is_llbot:
             current_members_raw = _unwrap_list_payload(current_members_raw)
         current_member_ids = {m.get("user_id") for m in current_members_raw} if current_members_raw else set()
-        logger.debug(f"[GroupBackup] 当前群已有 {len(current_member_ids)} 名成员。")
+        logger.debug(f"当前群已有 {len(current_member_ids)} 名成员。")
     except Exception as e:
-        logger.error(f"[GroupBackup] 获取当前群成员列表失败: {e}")
+        logger.error(f"获取当前群成员列表失败: {e}")
         yield event.plain_result(f"❌ 获取当前群成员失败，无法执行召回过滤。")
         return
 
@@ -475,18 +511,18 @@ async def group_recall_command(plugin, event: AstrMessageEvent):
         targets.append(uid)
 
     if not targets:
-        logger.info(f"[GroupBackup] 筛选完成，没有符合条件的召回目标。")
+        logger.info(f"筛选完成，没有符合条件的召回目标。")
         yield event.plain_result(f"✅ 筛选完毕，没有符合条件且不在本群的目标成员。")
         return
 
-    logger.info(f"[GroupBackup] 筛选出 {len(targets)} 名目标成员。准备开始发送私聊，间隔: {plugin.recall_interval}s")
+    logger.info(f"筛选出 {len(targets)} 名目标成员。准备开始发送私聊，间隔: {plugin.recall_interval}s")
     yield event.plain_result(f"🔍 筛选出 {len(targets)} 名目标成员，开始私聊召回...")
 
     # 4. 异步执行发送任务
     async def send_recall_messages():
         success_count = 0
         fail_count = 0
-        logger.info(f"[GroupBackup] 开始后台召回任务。总计: {len(targets)} 人")
+        logger.info(f"开始后台召回任务。总计: {len(targets)} 人")
         for i, target_uid in enumerate(targets):
             try:
                 if plugin._is_llbot:
@@ -513,17 +549,26 @@ async def group_recall_command(plugin, event: AstrMessageEvent):
                 success_count += 1
             except Exception as e:
                 fail_count += 1
-                logger.error(f"[GroupBackup] [{i+1}/{len(targets)}] 发送召回消息至 {target_uid} 失败: {e}")
+                err_str = str(e)
+                is_not_friend = "添加对方为好友" in err_str or "1200" in err_str
+                if is_not_friend:
+                    logger.warning(
+                        f"[{i+1}/{len(targets)}] 目标 {target_uid} 非好友，协议端不支持临时会话"
+                    )
+                else:
+                    logger.error(
+                        f"[{i+1}/{len(targets)}] 发送召回消息至 {target_uid} 失败: {e}"
+                    )
 
             if i < len(targets) - 1:
                 await asyncio.sleep(plugin.recall_interval)
 
         summary = f"📢 群友召回任务完成！\n成功: {success_count}\n失败: {fail_count}"
-        logger.info(f"[GroupBackup] 召回任务结束。成功: {success_count}, 失败: {fail_count}")
+        logger.info(f"召回任务结束。成功: {success_count}, 失败: {fail_count}")
         try:
             await client.send_group_msg(group_id=current_group_id, message=summary)
         except Exception as e:
-            logger.error(f"[GroupBackup] 发送任务总结消息失败: {e}")
+            logger.error(f"发送任务总结消息失败: {e}")
 
     # 创建后台任务
     asyncio.create_task(send_recall_messages())

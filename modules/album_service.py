@@ -130,24 +130,57 @@ async def backup_albums(
                                     logger.error(f"重命名相册文件夹失败: {e}")
 
                 media_list: List[Dict[str, Any]] = []
-                is_album_updated = True
+                is_album_updated = False
                 old_media_list: List[Dict[str, Any]] = []
+
+                current_modify_time = str(album.get("modify_time"))
+
                 if latest_data and "albums" in latest_data and "album_media" in latest_data:
+                    # 找到旧备份中该相册的信息
                     old_album_info = next((a for a in latest_data["albums"] if a["album_id"] == album_id), None)
                     old_media_list = latest_data["album_media"].get(album_id, [])
-                    if old_album_info and str(old_album_info.get("modify_time")) == str(album.get("modify_time")):
+
+                    # 只有当旧信息存在且修改时间一致时，才复用旧数据
+                    if old_album_info and str(old_album_info.get("modify_time")) == current_modify_time:
                         media_list = old_media_list
-                        if media_list:
-                            is_album_updated = False
-                            logger.debug(f"相册 {album_name} 修改时间未变，复用上次备份的 {len(media_list)} 个媒体记录。")
+                        is_album_updated = False
+                        logger.debug(f"相册 {album_name} 修改时间未变，复用本地记录。")
+                    else:
+                        is_album_updated = True
+                else:
+                    is_album_updated = True
 
                 if is_album_updated:
+                    media_list = []
                     try:
-                        result = await client.get_group_album_media_list(group_id=str(group_id), album_id=album_id)
-                        if isinstance(result, dict) and result.get("retcode", 0) != 0:
-                            raise Exception(f"API 响应异常: {result}")
+                        # 分页获取相册媒体列表
+                        raw_media_list = []
+                        attach_info = None
+                        while True:
+                            result = await client.get_group_album_media_list(
+                                group_id=str(group_id),
+                                album_id=album_id,
+                                attach_info=attach_info,
+                            )
+                            if isinstance(result, dict) and result.get("retcode", 0) != 0:
+                                raise Exception(f"API 响应异常: {result}")
 
-                        raw_media_list = normalize_album_media_response(result)
+                            page_media = normalize_album_media_response(result)
+                            raw_media_list.extend(page_media)
+
+                            # 检查是否还有更多分页
+                            if isinstance(result, dict):
+                                next_has_more = result.get("next_has_more", result.get("data", {}).get("next_has_more", False))
+                                next_attach_info = result.get("next_attach_info", result.get("data", {}).get("next_attach_info"))
+                            else:
+                                next_has_more = False
+                                next_attach_info = None
+                            if not next_has_more:
+                                break
+                            attach_info = next_attach_info
+                            if not attach_info:
+                                break
+
                         for m in raw_media_list:
                             if not isinstance(m, dict):
                                 continue

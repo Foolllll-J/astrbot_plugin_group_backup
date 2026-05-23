@@ -40,25 +40,30 @@ class GroupBackupPlugin(Star):
             "最后发言": "last_sent_time",
         }
         self._is_llbot = False
+        self._backend_client_id: int | None = None
 
-    async def initialize(self) -> None:
+    async def _ensure_backend_detected(self, client) -> None:
+        if client is None:
+            return
+
+        client_id = id(client)
+        if self._backend_client_id == client_id:
+            return
+
+        self._backend_client_id = client_id
+        self._is_llbot = False
+
         try:
-            platform = self.context.get_platform_inst("aiocqhttp")
-            if platform is None:
-                platform = self.context.get_platform(filter.PlatformAdapterType.AIOCQHTTP)
-            if platform is None:
-                logger.debug("[group_backup] 启动时未找到 aiocqhttp 平台，跳过协议端探测")
-                return
-
-            version_info = await platform.get_client().get_version_info()
+            version_info = await client.api.call_action("get_version_info")
             app_name = version_info.get("app_name") if isinstance(version_info, dict) else None
+            if app_name is None and isinstance(version_info, dict) and isinstance(version_info.get("data"), dict):
+                app_name = version_info["data"].get("app_name")
             self._is_llbot = app_name == "LLOneBot"
-            logger.info(
+            logger.debug(
                 f"[group_backup] 协议端探测结果: app_name={app_name or 'unknown'}, "
                 f"backend={'llbot' if self._is_llbot else 'napcat'}"
             )
         except Exception as e:
-            self._is_llbot = False
             logger.warning(f"[group_backup] 启动时探测协议端失败，默认按 NapCat 处理: {e}")
 
     def _format_timestamp(self, timestamp):
@@ -74,6 +79,7 @@ class GroupBackupPlugin(Star):
         return normalize_album_media_response(payload)
 
     async def _get_group_album_list(self, client, group_id: int | str):
+        await self._ensure_backend_detected(client)
         if self._is_llbot:
             api = getattr(client, "api", None)
             if api is None:
@@ -105,28 +111,33 @@ class GroupBackupPlugin(Star):
     @filter.command("群备份")
     async def group_backup(self, event: AstrMessageEvent, group_id_arg: str = ""):
         """群备份 [群号]：备份当前群或指定群数据到本地"""
+        await self._ensure_backend_detected(getattr(event, "bot", None))
         async for ret in group_backup_command(self, event, group_id_arg):
             yield ret
 
     @filter.command("删除群备份")
     async def delete_group_backup(self, event: AstrMessageEvent, group_id_arg: str = ""):
         """删除群备份 [群号]：物理删除指定群组的所有备份数据"""
+        await self._ensure_backend_detected(getattr(event, "bot", None))
         async for ret in delete_group_backup_command(self, event, group_id_arg):
             yield ret
     @filter.command("群导出")
     async def group_export(self, event: AstrMessageEvent, args: str = ""):
         """群导出 [群号] [选项...]：导出指定数据。选项可选：群信息、群成员、群公告、群精华、群荣誉、群相册"""
+        await self._ensure_backend_detected(getattr(event, "bot", None))
         async for ret in group_export_command(self, event, args):
             yield ret
 
     @filter.command("群恢复")
     async def group_restore(self, event: AstrMessageEvent, group_id_arg: str = ""):
         """群恢复 [群号]：将指定群或当前群的备份数据恢复到当前群"""
+        await self._ensure_backend_detected(getattr(event, "bot", None))
         async for ret in group_restore_command(self, event, group_id_arg):
             yield ret
 
     @filter.command("群友召回", alias={"群召回", "群友找回", "群员召回", "群员找回"})
     async def group_recall(self, event: AstrMessageEvent):
         """群友召回 [群等级] [群号] [消息文本] 或 [群号] [群等级] [消息文本]"""
+        await self._ensure_backend_detected(getattr(event, "bot", None))
         async for ret in group_recall_command(self, event):
             yield ret
