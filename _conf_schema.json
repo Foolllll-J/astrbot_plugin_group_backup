@@ -61,5 +61,49 @@
             "step": 1
         },
         "default": 60
+    },
+    "email_smtp": {
+        "description": "SMTP 邮件配置",
+        "hint": "配置 SMTP 邮件发送。非好友群友无法私聊时通过 QQ 邮箱补发召回消息。留空或 SMTP 服务器地址为空则不启用。",
+        "type": "object",
+        "default": {},
+        "items": {
+            "smtp_host": {
+                "description": "SMTP 服务器地址",
+                "hint": "例如 smtp.qq.com。留空表示不启用邮件通知。",
+                "type": "string",
+                "default": ""
+            },
+            "smtp_port": {
+                "description": "SMTP 服务器端口",
+                "hint": "SSL/TLS 模式默认 465，STARTTLS 模式默认 587。",
+                "type": "int",
+                "default": 465
+            },
+            "smtp_use_tls": {
+                "description": "SMTP 使用 SSL/TLS",
+                "hint": "true=SSL/TLS 端口 465 / false=STARTTLS 端口 587。",
+                "type": "bool",
+                "default": true
+            },
+            "smtp_user": {
+                "description": "SMTP 登录用户名",
+                "hint": "通常为邮箱地址。",
+                "type": "string",
+                "default": ""
+            },
+            "smtp_password": {
+                "description": "SMTP 登录密码",
+                "hint": "部分服务商需使用授权码而非登录密码。",
+                "type": "string",
+                "default": ""
+            },
+            "email_from": {
+                "description": "发件人地址",
+                "hint": "留空则使用 SMTP 用户名。",
+                "type": "string",
+                "default": ""
+            }
+        }
     }
 }

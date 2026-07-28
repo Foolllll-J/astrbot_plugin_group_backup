@@ -7,6 +7,7 @@ from typing import Any, Dict, List
 
 from astrbot.api import logger
 
+
 def get_latest_backup_data(plugin, group_id: int) -> Dict[str, Any]:
     """获取最近一次备份的数据"""
     group_dir = Path(plugin.plugin_data_dir) / str(group_id)
@@ -14,7 +15,11 @@ def get_latest_backup_data(plugin, group_id: int) -> Dict[str, Any]:
         return {}
 
     # 查找时间戳目录
-    backups = [d for d in group_dir.iterdir() if d.is_dir() and d.name.replace("_", "").isdigit()]
+    backups = [
+        d
+        for d in group_dir.iterdir()
+        if d.is_dir() and d.name.replace("_", "").isdigit()
+    ]
     if not backups:
         return {}
 
@@ -44,17 +49,38 @@ def append_log(plugin, group_id: int, log_name: str, log_entry: Dict[str, Any]):
         try:
             with open(log_file, "r", encoding="utf-8") as f:
                 logs = json.load(f)
-        except:
+        except Exception:
             logs = []
 
-    logs.append({
-        "log_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-        **log_entry
-    })
+    logs.append({"log_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"), **log_entry})
 
     with open(log_file, "w", encoding="utf-8") as f:
         json.dump(logs, f, ensure_ascii=False, indent=4)
     logger.debug(f"已追加日志到 {log_file}，键: {list(log_entry.keys())}")
+
+
+CRON_CONFIG_FILE = "cron_configs.json"
+
+
+def load_cron_configs(plugin) -> Dict[str, dict]:
+    """加载定时备份配置 {group_id: {"cron": ..., "platform_id": ...}}"""
+    cfg_path = Path(plugin.plugin_data_dir) / CRON_CONFIG_FILE
+    if not cfg_path.exists():
+        return {}
+    try:
+        with open(cfg_path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception as e:
+        logger.warning(f"加载定时备份配置失败: {e}")
+        return {}
+
+
+def save_cron_configs(plugin, configs: Dict[str, dict]):
+    """保存定时备份配置"""
+    cfg_path = Path(plugin.plugin_data_dir) / CRON_CONFIG_FILE
+    cfg_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(cfg_path, "w", encoding="utf-8") as f:
+        json.dump(configs, f, ensure_ascii=False, indent=4)
 
 
 def archive_deleted_items(plugin, group_id: int, item_type: str, items: List[Any]):
@@ -68,18 +94,22 @@ def archive_deleted_items(plugin, group_id: int, item_type: str, items: List[Any
         try:
             with open(archive_file, "r", encoding="utf-8") as f:
                 archive = json.load(f)
-        except:
+        except Exception:
             archive = {}
 
     if item_type not in archive:
         archive[item_type] = []
 
     for item in items:
-        archive[item_type].append({
-            "deleted_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            "content": item
-        })
+        archive[item_type].append(
+            {
+                "deleted_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "content": item,
+            }
+        )
 
     with open(archive_file, "w", encoding="utf-8") as f:
         json.dump(archive, f, ensure_ascii=False, indent=4)
-    logger.debug(f"已归档 {len(items)} 个已删除项目（类型: '{item_type}'）到 {archive_file}")
+    logger.debug(
+        f"已归档 {len(items)} 个已删除项目（类型: '{item_type}'）到 {archive_file}"
+    )

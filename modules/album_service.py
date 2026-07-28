@@ -106,14 +106,28 @@ async def backup_albums(
                 )
 
                 if latest_data and "albums" in latest_data:
-                    old_albums = {a["album_id"]: a.get("name") for a in latest_data["albums"]}
+                    old_albums = {
+                        a["album_id"]: a.get("name") for a in latest_data["albums"]
+                    }
                     if album_id in old_albums and old_albums[album_id] != album_name:
                         old_name = old_albums[album_id]
                         if old_name:
-                            old_path = Path(plugin.plugin_data_dir) / str(group_id) / "albums" / old_name
-                            new_path = Path(plugin.plugin_data_dir) / str(group_id) / "albums" / album_name
+                            old_path = (
+                                Path(plugin.plugin_data_dir)
+                                / str(group_id)
+                                / "albums"
+                                / old_name
+                            )
+                            new_path = (
+                                Path(plugin.plugin_data_dir)
+                                / str(group_id)
+                                / "albums"
+                                / album_name
+                            )
                             if old_path.exists() and not new_path.exists():
-                                logger.info(f"检测到相册改名: {old_name} -> {album_name}，正在重命名文件夹。")
+                                logger.info(
+                                    f"检测到相册改名: {old_name} -> {album_name}，正在重命名文件夹。"
+                                )
                                 try:
                                     shutil.move(str(old_path), str(new_path))
                                     plugin._append_log(
@@ -135,13 +149,24 @@ async def backup_albums(
 
                 current_modify_time = str(album.get("modify_time"))
 
-                if latest_data and "albums" in latest_data and "album_media" in latest_data:
+                if (
+                    latest_data
+                    and "albums" in latest_data
+                    and "album_media" in latest_data
+                ):
                     # 找到旧备份中该相册的信息
-                    old_album_info = next((a for a in latest_data["albums"] if a["album_id"] == album_id), None)
+                    old_album_info = next(
+                        (a for a in latest_data["albums"] if a["album_id"] == album_id),
+                        None,
+                    )
                     old_media_list = latest_data["album_media"].get(album_id, [])
 
                     # 只有当旧信息存在且修改时间一致时，才复用旧数据
-                    if old_album_info and str(old_album_info.get("modify_time")) == current_modify_time:
+                    if (
+                        old_album_info
+                        and str(old_album_info.get("modify_time"))
+                        == current_modify_time
+                    ):
                         media_list = old_media_list
                         is_album_updated = False
                         logger.debug(f"相册 {album_name} 修改时间未变，复用本地记录。")
@@ -162,7 +187,10 @@ async def backup_albums(
                                 album_id=album_id,
                                 attach_info=attach_info,
                             )
-                            if isinstance(result, dict) and result.get("retcode", 0) != 0:
+                            if (
+                                isinstance(result, dict)
+                                and result.get("retcode", 0) != 0
+                            ):
                                 raise Exception(f"API 响应异常: {result}")
 
                             page_media = normalize_album_media_response(result)
@@ -170,8 +198,14 @@ async def backup_albums(
 
                             # 检查是否还有更多分页
                             if isinstance(result, dict):
-                                next_has_more = result.get("next_has_more", result.get("data", {}).get("next_has_more", False))
-                                next_attach_info = result.get("next_attach_info", result.get("data", {}).get("next_attach_info"))
+                                next_has_more = result.get(
+                                    "next_has_more",
+                                    result.get("data", {}).get("next_has_more", False),
+                                )
+                                next_attach_info = result.get(
+                                    "next_attach_info",
+                                    result.get("data", {}).get("next_attach_info"),
+                                )
                             else:
                                 next_has_more = False
                                 next_attach_info = None
@@ -181,6 +215,7 @@ async def backup_albums(
                             if not attach_info:
                                 break
 
+                        url_extract_fail = 0
                         for m in raw_media_list:
                             if not isinstance(m, dict):
                                 continue
@@ -198,9 +233,13 @@ async def backup_albums(
                                             best_url = p.get("url", {}).get("url", "")
                                             break
                                     if not best_url and photo_urls:
-                                        best_url = photo_urls[0].get("url", {}).get("url", "")
+                                        best_url = (
+                                            photo_urls[0].get("url", {}).get("url", "")
+                                        )
                                     if not best_url:
-                                        best_url = img_detail.get("default_url", {}).get("url", "")
+                                        best_url = img_detail.get(
+                                            "default_url", {}
+                                        ).get("url", "")
 
                             elif media_type == 1:
                                 video_detail = m.get("video")
@@ -208,7 +247,9 @@ async def backup_albums(
                                     media_id = video_detail.get("id")
                                     video_urls = video_detail.get("video_url", [])
                                     if video_urls:
-                                        best_url = video_urls[0].get("url", {}).get("url", "")
+                                        best_url = (
+                                            video_urls[0].get("url", {}).get("url", "")
+                                        )
                                     if not best_url:
                                         best_url = video_detail.get("url")
 
@@ -222,23 +263,34 @@ async def backup_albums(
                                     }
                                 )
                             else:
-                                logger.warning(f"未能从媒体项提取到有效 URL，字段: {list(m.keys())}")
+                                url_extract_fail += 1
+                        if url_extract_fail:
+                            logger.warning(
+                                f"相册 {album_name} 中有 {url_extract_fail} 个媒体项无法提取 URL"
+                            )
                     except Exception as e:
                         logger.error(f"获取相册 {album_id} 媒体列表失败: {e}")
                         if old_media_list:
                             media_list = old_media_list
-                            logger.warning(f"由于 API 请求失败，相册 {album_name} 暂时复用旧备份数据。")
+                            logger.warning(
+                                f"由于 API 请求失败，相册 {album_name} 暂时复用旧备份数据。"
+                            )
 
                 media_list = sort_backup_album_media(media_list)
                 album_media_map[album_id] = media_list
 
                 if media_list:
-                    album_save_dir = Path(plugin.plugin_data_dir) / str(group_id) / "albums" / album_name
+                    album_save_dir = (
+                        Path(plugin.plugin_data_dir)
+                        / str(group_id)
+                        / "albums"
+                        / album_name
+                    )
                     album_save_dir.mkdir(parents=True, exist_ok=True)
 
                     if is_album_updated:
-                        logger.debug(f"正在下载相册 {album_name} 中的 {len(media_list)} 个媒体文件...")
-                        download_tasks = []
+                        new_media = []
+                        existing = 0
                         for media in media_list:
                             url = media.get("url")
                             media_id = media.get("media_id")
@@ -247,14 +299,35 @@ async def backup_albums(
                                 if media.get("media_type") == 1:
                                     file_ext = ".mp4"
                                 save_path = album_save_dir / f"{media_id}{file_ext}"
-                                download_tasks.append(plugin._download_file(url, save_path))
-                        if download_tasks:
-                            await asyncio.gather(*download_tasks)
+                                if save_path.exists():
+                                    existing += 1
+                                    continue
+                                new_media.append((url, save_path))
+                        if new_media:
+                            logger.debug(
+                                f"相册 {album_name} 待下载 {len(new_media)} 个新媒体文件"
+                                f"{f'（跳过 {existing} 个已存在）' if existing else ''}..."
+                            )
+                            download_tasks = [
+                                plugin._download_file(url, p) for url, p in new_media
+                            ]
+                            results = await asyncio.gather(*download_tasks)
+                            success = sum(1 for r in results if r)
+                            failed = len(results) - success
+                            logger.info(
+                                f"相册 {album_name} 下载完成: 成功 {success}, 失败 {failed}"
+                            )
+                        else:
+                            logger.debug(
+                                f"相册 {album_name} 无新增媒体文件，跳过下载{'（已存在 ' + str(existing) + ' 个）' if existing else ''}。"
+                            )
                     else:
                         missing_count = 0
                         for media in media_list:
                             media_id = media.get("media_id")
-                            file_ext = ".jpg" if media.get("media_type") == 0 else ".mp4"
+                            file_ext = (
+                                ".jpg" if media.get("media_type") == 0 else ".mp4"
+                            )
                             if not (album_save_dir / f"{media_id}{file_ext}").exists():
                                 missing_count += 1
                         if missing_count > 0:

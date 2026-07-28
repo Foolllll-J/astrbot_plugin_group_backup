@@ -40,7 +40,6 @@ async def download_file(
     overwrite: bool = False,
 ) -> bool:
     if not overwrite and save_path.exists():
-        logger.debug(f"文件已存在，跳过下载: {save_path}")
         return True
 
     async with semaphore:
@@ -54,16 +53,17 @@ async def download_file(
 
                             with open(save_path, "rb") as f:
                                 old_content = f.read()
-                            if hashlib.md5(content).hexdigest() == hashlib.md5(old_content).hexdigest():
+                            if (
+                                hashlib.md5(content).hexdigest()
+                                == hashlib.md5(old_content).hexdigest()
+                            ):
                                 return False
 
                         save_path.parent.mkdir(parents=True, exist_ok=True)
                         with open(save_path, "wb") as f:
                             f.write(content)
-                        logger.debug(f"成功保存文件: {save_path}")
                         return True
                     logger.warning(f"下载文件失败 {url}: HTTP {response.status}")
         except Exception as e:
             logger.error(f"下载过程出错 {url}: {e}")
     return False
-
