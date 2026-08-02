@@ -59,7 +59,7 @@
 * 自动从老群备份中筛选符合等级要求的成员（等级**大于或等于**指定的 `群等级` ）。
 * 消息文本中支持使用 `@群号`（如 `@123456789`），会自动将其识别并转换为 `群名片` 发送。
 
-> [!CAUTION]
+> [!IMPORTANT]
 > 目标用户需为 Bot 好友。对于非好友用户，可配置 SMTP 邮件通过 QQ 邮箱补发召回消息。  
 > 必须对老群使用过群备份才能执行召回。  
 
@@ -71,8 +71,7 @@
 **指令**: `/删除群备份 [群号]`
 * 删除指定群在本地的所有备份数据。
 
-> [!IMPORTANT]
-> * **环境要求**: 本插件**仅适用于 NapCat & LLBot** 环境，建议使用最新版本以获得最佳兼容性。  
+> [!CAUTION]
 > * **API 限制**: 受限于协议端 API，Napcat 无法备份开启了“发给新成员”选项的群公告且无法恢复视频到群相册。
 
 ---
@@ -109,8 +108,8 @@
 
 如果您有备份群文件的需求，可以尝试以下插件：
 
-* 📂 [astrbot_plugin_GroupFS](https://github.com/Foolllll-J/astrbot_plugin_GroupFS): 支持备份群文件到**本地**。
-* ☁️ [astrbot_plugin_openlistfile](https://github.com/Foolllll-J/astrbot_plugin_openlistfile): 支持备份群文件到**网盘**。
+* 📂 [QQ 群文件管家](https://github.com/Foolllll-J/astrbot_plugin_GroupFS): 支持备份群文件到**本地**。
+* ☁️ [OpenList 助手](https://github.com/Foolllll-J/astrbot_plugin_openlistfile): 支持备份群文件到**网盘**。
 
 ---
 

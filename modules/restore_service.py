@@ -319,10 +319,13 @@ async def group_restore_command(
                         existing_media_ids = set()
                         attach_info = None
                         while True:
+                            kwargs = {
+                                "group_id": str(current_group_id),
+                                "album_id": target_album_id,
+                                "attach_info": attach_info,
+                            }
                             target_media_raw = await client.get_group_album_media_list(
-                                group_id=str(current_group_id),
-                                album_id=target_album_id,
-                                attach_info=attach_info,
+                                **kwargs
                             )
 
                             media_items = plugin._normalize_album_media_response(
@@ -512,7 +515,7 @@ async def group_recall_command(plugin, event: AstrMessageEvent):
         if segment.startswith("@") and segment[1:].isdigit():
             # 识别到 @群号，需要发送群名片
             card_group_id = segment[1:]
-            if plugin._is_llbot:
+            if plugin._is_llbot or plugin._backend_type == "snowluma":
                 cq_group_card = f"[CQ:contact,type=group,id={card_group_id}]"
                 recall_message_chain.append(
                     {"type": "text", "data": {"text": cq_group_card}}

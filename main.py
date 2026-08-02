@@ -64,6 +64,7 @@ class GroupBackupPlugin(Star):
             "加群时间": "join_time",
             "最后发言": "last_sent_time",
         }
+        self._backend_type = "napcat"
         self._is_llbot = False
         self._backend_client_id: int | None = None
 
@@ -75,7 +76,7 @@ class GroupBackupPlugin(Star):
         if self._backend_client_id == client_id:
             return
 
-        self._backend_client_id = client_id
+        self._backend_type = "napcat"
         self._is_llbot = False
 
         try:
@@ -89,10 +90,16 @@ class GroupBackupPlugin(Star):
                 and isinstance(version_info.get("data"), dict)
             ):
                 app_name = version_info["data"].get("app_name")
-            self._is_llbot = app_name == "LLOneBot"
+            if app_name == "LLOneBot":
+                self._backend_type = "llbot"
+                self._is_llbot = True
+            elif app_name == "SnowLuma":
+                self._backend_type = "snowluma"
+            # else: napcat (NapCat.Onebot 及未知)
+            self._backend_client_id = client_id
             logger.debug(
                 f"[group_backup] 协议端探测结果: app_name={app_name or 'unknown'}, "
-                f"backend={'llbot' if self._is_llbot else 'napcat'}"
+                f"backend={self._backend_type}"
             )
         except Exception as e:
             logger.warning(
@@ -216,7 +223,6 @@ class GroupBackupPlugin(Star):
                     cron = entry["cron"] if isinstance(entry, dict) else entry
                     gid = int(gid_str)
                     self._schedule_cron_job(gid, cron)
-                    logger.info(f"[group_backup] 延迟恢复定时备份: 群 {gid} -> {cron}")
                 except (ValueError, Exception) as e:
                     logger.warning(
                         f"[group_backup] 延迟恢复定时备份失败 {gid_str}: {e}"
@@ -238,7 +244,6 @@ class GroupBackupPlugin(Star):
                 cron = entry["cron"] if isinstance(entry, dict) else entry
                 gid = int(gid_str)
                 self._schedule_cron_job(gid, cron)
-                logger.info(f"[group_backup] 已恢复定时备份: 群 {gid} -> {cron}")
             except (ValueError, Exception) as e:
                 logger.warning(f"[group_backup] 恢复定时备份失败 {gid_str}: {e}")
         if self._bot_client is None:

@@ -11,47 +11,19 @@ from astrbot.api import logger
 def normalize_album_list_response(payload: Any) -> List[Dict[str, Any]]:
     if isinstance(payload, list):
         return [item for item in payload if isinstance(item, dict)]
-    if not isinstance(payload, dict):
-        return []
-
-    data = payload.get("data")
-    if isinstance(data, dict):
-        album_list = data.get("album_list") or data.get("list")
-        if isinstance(album_list, list):
-            return [item for item in album_list if isinstance(item, dict)]
-
-    album_list = payload.get("album_list") or payload.get("list")
-    if isinstance(album_list, list):
-        return [item for item in album_list if isinstance(item, dict)]
+    if isinstance(payload, dict):
+        data = payload.get("data")
+        if isinstance(data, list):
+            return [item for item in data if isinstance(item, dict)]
     return []
 
 
 def normalize_album_media_response(payload: Any) -> List[Dict[str, Any]]:
-    if isinstance(payload, list):
-        return [item for item in payload if isinstance(item, dict)]
-    if not isinstance(payload, dict):
-        return []
-
-    data = payload.get("data")
-    if isinstance(data, dict):
-        for key in ("media_list", "media", "m_media", "list"):
-            if isinstance(data.get(key), list):
-                return [item for item in data[key] if isinstance(item, dict)]
-        album_info = data.get("album")
-        if isinstance(album_info, dict):
-            cover = album_info.get("cover")
-            if isinstance(cover, dict) and isinstance(cover.get("image"), dict):
-                return [cover]
-
-    for key in ("media_list", "media", "m_media", "list"):
-        if isinstance(payload.get(key), list):
-            return [item for item in payload[key] if isinstance(item, dict)]
-
-    album_info = payload.get("album")
-    if isinstance(album_info, dict):
-        cover = album_info.get("cover")
-        if isinstance(cover, dict) and isinstance(cover.get("image"), dict):
-            return [cover]
+    if isinstance(payload, dict):
+        for key in ("media_list", "mediaList"):
+            val = payload.get(key)
+            if isinstance(val, list):
+                return [item for item in val if isinstance(item, dict)]
     return []
 
 
@@ -181,12 +153,21 @@ async def backup_albums(
                         # 分页获取相册媒体列表
                         raw_media_list = []
                         attach_info = None
+                        _page = 0
+                        _max_pages = 100
                         while True:
-                            result = await client.get_group_album_media_list(
-                                group_id=str(group_id),
-                                album_id=album_id,
-                                attach_info=attach_info,
-                            )
+                            _page += 1
+                            if _page > _max_pages:
+                                logger.warning(
+                                    f"相册 {album_name} 分页超过 {_max_pages} 页，强制终止"
+                                )
+                                break
+                            kwargs = {
+                                "group_id": str(group_id),
+                                "album_id": album_id,
+                                "attach_info": attach_info,
+                            }
+                            result = await client.get_group_album_media_list(**kwargs)
                             if (
                                 isinstance(result, dict)
                                 and result.get("retcode", 0) != 0
@@ -196,20 +177,23 @@ async def backup_albums(
                             page_media = normalize_album_media_response(result)
                             raw_media_list.extend(page_media)
 
-                            # 检查是否还有更多分页
-                            if isinstance(result, dict):
-                                next_has_more = result.get(
-                                    "next_has_more",
-                                    result.get("data", {}).get("next_has_more", False),
+                            next_has_more = result.get("next_has_more")
+                            if next_has_more is None:
+                                next_has_more = result.get("has_more")
+                            next_attach_info = result.get("next_attach_info")
+                            if next_attach_info is None:
+                                next_attach_info = result.get("attach_info")
+                            if next_attach_info is None:
+                                next_attach_info = result.get("nextAttachInfo")
+                            if next_has_more is not None:
+                                if not next_has_more:
+                                    break
+                            elif not next_attach_info:
+                                break
+                            if next_attach_info == attach_info:
+                                logger.warning(
+                                    f"相册 {album_name} attach_info 未变化，终止分页防止死循环"
                                 )
-                                next_attach_info = result.get(
-                                    "next_attach_info",
-                                    result.get("data", {}).get("next_attach_info"),
-                                )
-                            else:
-                                next_has_more = False
-                                next_attach_info = None
-                            if not next_has_more:
                                 break
                             attach_info = next_attach_info
                             if not attach_info:
