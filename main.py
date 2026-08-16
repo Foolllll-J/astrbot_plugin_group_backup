@@ -39,6 +39,7 @@ class GroupBackupPlugin(Star):
         self.download_semaphore = asyncio.Semaphore(5)  # 限制并发下载数
 
         self._scheduler = AsyncIOScheduler()
+        self.active_tasks = []
         self._bot_client = None
         self._bound_platform_id: str | None = None
 
@@ -247,7 +248,30 @@ class GroupBackupPlugin(Star):
             except (ValueError, Exception) as e:
                 logger.warning(f"[group_backup] 恢复定时备份失败 {gid_str}: {e}")
         if self._bot_client is None:
-            asyncio.create_task(self._delayed_start_scheduler())
+            self.active_tasks.append(
+                asyncio.create_task(self._delayed_start_scheduler())
+            )
+
+    async def terminate(self):
+        logger.info("[group_backup] 插件正在卸载，取消所有任务...")
+
+        if self._scheduler.running:
+            try:
+                self._scheduler.shutdown(wait=False)
+                logger.debug("[group_backup] APScheduler 定时任务调度器已成功停止。")
+            except Exception as e:
+                logger.error(f"[group_backup] 停止 APScheduler 时发生错误: {e}")
+
+        for task in self.active_tasks:
+            if not task.done():
+                task.cancel()
+
+        try:
+            await asyncio.gather(*self.active_tasks, return_exceptions=True)
+        except asyncio.CancelledError:
+            pass
+
+        logger.info("[group_backup] 插件已卸载。")
 
     def _ensure_event_bot_bound(self, event: AstrMessageEvent):
         if self._bot_client is not None:
