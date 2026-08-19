@@ -1,7 +1,7 @@
 name: astrbot_plugin_group_backup
 display_name: QQ 群备份
 desc: 备份 QQ 群成员、群公告、群精华、群相册等数据，支持导出恢复及群员召回。
-version: v1.3.2
+version: v1.3.3
 author: Foolllll
 author_url: https://github.com/Foolllll-J
 repo: https://github.com/Foolllll-J/astrbot_plugin_group_backup

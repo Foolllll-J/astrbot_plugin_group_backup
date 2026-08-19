@@ -22,6 +22,34 @@ def _unwrap_list_payload(payload):
     return payload
 
 
+async def _fetch_friend_ids(client) -> set[int] | None:
+    """拉取协议端好友列表，返回好友 QQ 号集合。"""
+    try:
+        call_action = getattr(client, "call_action", None)
+        if callable(call_action):
+            raw = await call_action("get_friend_list")
+        else:
+            api = getattr(client, "api", None)
+            raw = await api.call_action("get_friend_list")
+    except Exception as e:
+        logger.warning(f"[group_backup] 拉取好友列表失败，退回逐条试错判断: {e}")
+        return None
+
+    if isinstance(raw, dict) and isinstance(raw.get("data"), list):
+        raw = raw["data"]
+    if not isinstance(raw, list):
+        logger.warning("[group_backup] 好友列表返回格式异常，退回逐条试错判断。")
+        return None
+
+    friend_ids = set()
+    for item in raw:
+        if isinstance(item, dict):
+            uid = item.get("user_id")
+            if uid is not None:
+                friend_ids.add(int(uid))
+    return friend_ids
+
+
 def _file_to_base64_uri(file_path: str) -> str:
     raw = Path(file_path).read_bytes()
     b64 = base64.b64encode(raw).decode("ascii")
@@ -620,17 +648,29 @@ async def group_recall_command(plugin, event: AstrMessageEvent):
         return
 
     logger.info(
-        f"筛选出 {len(targets)} 名目标成员。准备开始发送私聊，间隔: {plugin.recall_interval}s"
+        f"筛选出 {len(targets)} 名目标成员。准备开始召回，间隔: {plugin.recall_interval}s"
     )
-    yield event.plain_result(f"🔍 筛选出 {len(targets)} 名目标成员，开始私聊召回...")
+    yield event.plain_result(f"🔍 筛选出 {len(targets)} 名目标成员，开始召回...")
 
     # 4. 异步执行发送任务
     async def send_recall_messages():
-        success_count = 0
-        fail_count = 0
-        non_friend_targets = []
+        private_success = 0
+        email_targets = []
         logger.info(f"开始后台召回任务。总计: {len(targets)} 人")
-        for i, target_uid in enumerate(targets):
+
+        # 先拉取一次好友列表，将非好友目标直接转入邮件备用通道
+        friend_ids = await _fetch_friend_ids(client)
+        if friend_ids is not None:
+            friend_targets = [uid for uid in targets if uid in friend_ids]
+            email_targets = [uid for uid in targets if uid not in friend_ids]
+            if email_targets:
+                logger.info(
+                    f"好友列表预筛完成，{len(email_targets)} 名非好友目标直接转入邮件召回。"
+                )
+        else:
+            friend_targets = list(targets)
+
+        for i, target_uid in enumerate(friend_targets):
             try:
                 if plugin._is_llbot:
                     api = getattr(client, "api", None)
@@ -657,61 +697,83 @@ async def group_recall_command(plugin, event: AstrMessageEvent):
                         )
                         await asyncio.sleep(0.2)
 
-                success_count += 1
+                private_success += 1
             except Exception as e:
-                fail_count += 1
+                email_targets.append(target_uid)  # 私聊失败转入邮件备用通道
                 err_str = str(e)
                 is_not_friend = "添加对方为好友" in err_str or "1200" in err_str
                 if is_not_friend:
-                    non_friend_targets.append(target_uid)
                     logger.warning(
-                        f"[{i + 1}/{len(targets)}] 目标 {target_uid} 非好友，协议端不支持临时会话"
+                        f"[{i + 1}/{len(friend_targets)}] 目标 {target_uid} 非好友，协议端不支持临时会话"
                     )
                 else:
                     logger.error(
-                        f"[{i + 1}/{len(targets)}] 发送召回消息至 {target_uid} 失败: {e}"
+                        f"[{i + 1}/{len(friend_targets)}] 发送召回消息至 {target_uid} 失败: {e}"
                     )
 
-            if i < len(targets) - 1:
+            if i < len(friend_targets) - 1:
                 await asyncio.sleep(plugin.recall_interval)
 
-        email_ok = 0
-        email_fail = 0
-        if non_friend_targets and plugin._smtp_config:
-            old_group_detail = latest_data.get("group_detail", {})
-            old_group_name = old_group_detail.get("groupName", str(source_group_id))
-            new_group_name = str(current_group_id)
-            try:
-                group_info_res = await client.get_group_info(group_id=current_group_id)
-                if isinstance(group_info_res, dict):
-                    new_group_name = (
-                        group_info_res.get("group_name")
-                        or group_info_res.get("groupName")
-                        or str(current_group_id)
+        email_success = 0
+        if email_targets:
+            if plugin._smtp_config:
+                old_group_detail = latest_data.get("group_detail", {})
+                old_group_name = old_group_detail.get("groupName", str(source_group_id))
+                new_group_name = str(current_group_id)
+                try:
+                    group_info_res = await client.get_group_info(
+                        group_id=current_group_id
                     )
-            except Exception:
-                pass
-            email_ok, email_fail = await send_recall_emails(
-                plugin._smtp_config,
-                non_friend_targets,
-                full_message_text,
-                old_group_name,
-                source_group_id,
-                new_group_name,
-                current_group_id,
-                logger,
-            )
+                    if isinstance(group_info_res, dict):
+                        new_group_name = (
+                            group_info_res.get("group_name")
+                            or group_info_res.get("groupName")
+                            or str(current_group_id)
+                        )
+                except Exception:
+                    pass
+                email_success, _ = await send_recall_emails(
+                    plugin._smtp_config,
+                    email_targets,
+                    full_message_text,
+                    old_group_name,
+                    source_group_id,
+                    new_group_name,
+                    current_group_id,
+                    logger,
+                )
+            else:
+                logger.warning(
+                    f"存在 {len(email_targets)} 名目标未能私聊送达，但未配置 SMTP，无法邮件补发。"
+                )
 
-        summary = f"📢 群友召回任务完成！\n成功: {success_count}\n失败: {fail_count}"
-        if non_friend_targets:
-            summary += f"\n📧 邮件补发({len(non_friend_targets)}人): 成功 {email_ok}, 失败 {email_fail}"
+        # 成功 = 私聊成功 + 邮件成功；仅私聊与邮件都失败才计入失败
+        success_total = private_success + email_success
+        failed_total = len(targets) - success_total
+
+        success_parts = []
+        if private_success:
+            success_parts.append(f"私聊 {private_success}")
+        if email_success:
+            success_parts.append(f"邮件 {email_success}")
+        if not success_parts:
+            success_parts.append("0")
+        summary_lines = [
+            "📢 群友召回任务完成！",
+            "成功: " + ", ".join(success_parts),
+        ]
+        if failed_total:
+            summary_lines.append(f"失败: {failed_total}")
+        summary = "\n".join(summary_lines)
         logger.info(
-            f"召回任务结束。成功: {success_count}, 失败: {fail_count}, 非好友: {len(non_friend_targets)}"
+            f"召回任务结束。成功: {success_total} (私聊 {private_success}, 邮件 {email_success}), "
+            f"失败: {failed_total}, 邮件通道 {len(email_targets)} 人"
         )
         try:
             await client.send_group_msg(group_id=current_group_id, message=summary)
         except Exception as e:
             logger.error(f"发送任务总结消息失败: {e}")
 
-    # 创建后台任务
-    asyncio.create_task(send_recall_messages())
+    # 创建后台任务，登记到插件以便卸载时取消终止
+    recall_task = asyncio.create_task(send_recall_messages())
+    plugin._track_running_task(recall_task)

@@ -60,7 +60,7 @@
             "max": 300,
             "step": 1
         },
-        "default": 60
+        "default": 30
     },
     "email_smtp": {
         "description": "SMTP 邮件配置",

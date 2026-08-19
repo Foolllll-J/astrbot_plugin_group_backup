@@ -52,7 +52,7 @@ class GroupBackupPlugin(Star):
             "restore_options",
             ["群名称", "群头像", "群昵称", "群头衔", "群管理", "群相册"],
         )
-        self.recall_interval = int(self.config.get("recall_interval", 60))  # 默认 60 秒
+        self.recall_interval = int(self.config.get("recall_interval", 30))  # 默认 30 秒
         self._smtp_config: SmtpConfig | None = self._read_smtp_config()
 
         self.field_map = {
@@ -229,6 +229,13 @@ class GroupBackupPlugin(Star):
                         f"[group_backup] 延迟恢复定时备份失败 {gid_str}: {e}"
                     )
 
+    def _track_running_task(self, task: asyncio.Task) -> None:
+        """登记运行中的任务，插件卸载时由 terminate() 统一取消终止。"""
+        if task is None or task in self.active_tasks:
+            return
+        self.active_tasks.append(task)
+        task.add_done_callback(self.active_tasks.remove)
+
     async def initialize(self):
         # 从已有 cron 配置中恢复 platform_id
         configs = load_cron_configs(self)
@@ -312,6 +319,7 @@ class GroupBackupPlugin(Star):
         """群备份 [群号]：备份当前群或指定群数据到本地。支持定时：输入标准5段cron表达式可设置定时备份。"""
         self._ensure_event_bot_bound(event)
         await self._ensure_backend_detected(self._bot_client)
+        self._track_running_task(asyncio.current_task())
 
         parts = event.message_str.strip().split(maxsplit=1)
         group_id_arg = parts[1] if len(parts) > 1 else ""
@@ -390,6 +398,7 @@ class GroupBackupPlugin(Star):
         """群导出 [群号] [选项...]：导出指定数据。选项可选：群信息、群成员、群公告、群精华、群荣誉、群相册"""
         self._ensure_event_bot_bound(event)
         await self._ensure_backend_detected(self._bot_client)
+        self._track_running_task(asyncio.current_task())
         async for ret in group_export_command(self, event, args):
             yield ret
 
@@ -398,6 +407,7 @@ class GroupBackupPlugin(Star):
         """群恢复 [群号]：将指定群或当前群的备份数据恢复到当前群"""
         self._ensure_event_bot_bound(event)
         await self._ensure_backend_detected(self._bot_client)
+        self._track_running_task(asyncio.current_task())
         async for ret in group_restore_command(self, event, group_id_arg):
             yield ret
 

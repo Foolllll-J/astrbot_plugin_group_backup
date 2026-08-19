@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import json
 import os
+import re
 import zipfile
 from datetime import datetime
 from io import BytesIO
@@ -22,6 +23,24 @@ def _unwrap_list_payload(payload):
     ):
         return payload["data"]
     return payload
+
+
+# openpyxl 拒绝写入的 XML 非法控制字符（含 ESC、C0/C1 控制字符），
+_ILLEGAL_EXCEL_CHARS_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]")
+
+
+def _sanitize_for_excel(value):
+    """净化写入 Excel 的文本，去除 XML 非法控制字符。"""
+    if isinstance(value, str):
+        return _ILLEGAL_EXCEL_CHARS_RE.sub("", value)
+    return value
+
+
+def _write_df_to_excel(df: pd.DataFrame, writer, sheet_name: str) -> None:
+    """净化 DataFrame 单元格后写入 Excel sheet。"""
+    for col in df.columns:
+        df[col] = df[col].map(_sanitize_for_excel)
+    df.to_excel(writer, index=False, sheet_name=sheet_name)
 
 
 def _normalize_group_detail_for_llbot(raw_detail: dict) -> dict:
@@ -194,9 +213,7 @@ async def group_export_command(plugin, event: AstrMessageEvent, args: str = ""):
                             for k, v in display_detail.items()
                             if v is not None
                         ]
-                        pd.DataFrame(detail_list).to_excel(
-                            writer, index=False, sheet_name="群概况"
-                        )
+                        _write_df_to_excel(pd.DataFrame(detail_list), writer, "群概况")
 
                 # 2. 导出群成员
                 if "群成员" in requested_options:
@@ -230,8 +247,8 @@ async def group_export_command(plugin, event: AstrMessageEvent, args: str = ""):
                                     }.get(val, val)
                                 item[opt] = val
                             processed_members.append(item)
-                        pd.DataFrame(processed_members).to_excel(
-                            writer, index=False, sheet_name="群成员"
+                        _write_df_to_excel(
+                            pd.DataFrame(processed_members), writer, "群成员"
                         )
 
                 # 3. 导出群公告
@@ -327,8 +344,8 @@ async def group_export_command(plugin, event: AstrMessageEvent, args: str = ""):
 
                             processed_notices.append(notice_data)
                         if processed_notices:
-                            pd.DataFrame(processed_notices).to_excel(
-                                writer, index=False, sheet_name="群公告"
+                            _write_df_to_excel(
+                                pd.DataFrame(processed_notices), writer, "群公告"
                             )
 
                 # 4. 导出群精华
@@ -364,8 +381,8 @@ async def group_export_command(plugin, event: AstrMessageEvent, args: str = ""):
                                     "操作者": e.get("operator_id"),
                                 }
                             )
-                        pd.DataFrame(processed_essence).to_excel(
-                            writer, index=False, sheet_name="群精华"
+                        _write_df_to_excel(
+                            pd.DataFrame(processed_essence), writer, "群精华"
                         )
 
                 # 5. 导出群荣誉
@@ -417,8 +434,8 @@ async def group_export_command(plugin, event: AstrMessageEvent, args: str = ""):
                                         }
                                     )
                         if honor_list:
-                            pd.DataFrame(honor_list).to_excel(
-                                writer, index=False, sheet_name="群荣誉"
+                            _write_df_to_excel(
+                                pd.DataFrame(honor_list), writer, "群荣誉"
                             )
 
                 # 6. 导出群相册列表
@@ -449,8 +466,8 @@ async def group_export_command(plugin, event: AstrMessageEvent, args: str = ""):
                                     ),
                                 }
                             )
-                        pd.DataFrame(processed_albums).to_excel(
-                            writer, index=False, sheet_name="群相册列表"
+                        _write_df_to_excel(
+                            pd.DataFrame(processed_albums), writer, "群相册列表"
                         )
 
                 # 7. 导出已删除的项目（回收站数据）
@@ -556,8 +573,8 @@ async def group_export_command(plugin, event: AstrMessageEvent, args: str = ""):
                                     )
 
                             if processed_items:
-                                pd.DataFrame(processed_items).to_excel(
-                                    writer, index=False, sheet_name=sheet_name
+                                _write_df_to_excel(
+                                    pd.DataFrame(processed_items), writer, sheet_name
                                 )
                     except Exception as e:
                         logger.warning(f"导出已删除项目失败: {e}")

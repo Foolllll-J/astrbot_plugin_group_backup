@@ -290,8 +290,24 @@ async def execute_group_backup(plugin, client, group_id: int) -> bool:
                                     img_url = f"https://gdynamic.qpic.cn/gdynamic/{img_id}/{size}"
 
                                 img["url"] = img_url
-                                # 备份图片到本地
-                                ext = ".jpg"
+                                # 备份图片到本地，扩展名优先取 URL/文件名原有后缀
+                                img_name = (
+                                    img.get("file") if isinstance(img, dict) else None
+                                )
+                                ext = (
+                                    Path(img_name).suffix.lower()
+                                    if img_name
+                                    else Path(img_url).suffix.lower()
+                                )
+                                if ext not in (
+                                    ".jpg",
+                                    ".jpeg",
+                                    ".png",
+                                    ".gif",
+                                    ".webp",
+                                    ".bmp",
+                                ):
+                                    ext = ".jpg"
                                 local_path = notice_img_dir / f"{img_id}{ext}"
                                 success = await plugin._download_file(
                                     img_url, local_path
@@ -370,13 +386,30 @@ async def execute_group_backup(plugin, client, group_id: int) -> bool:
                 if raw_essence and isinstance(raw_essence, list):
                     # 精简群精华并获取发送时间
                     for e in raw_essence:
+                        content = e.get("content")
+                        if not content:
+                            try:
+                                msg_resp = await client.get_msg(
+                                    message_id=e.get("message_id")
+                                )
+                                if isinstance(msg_resp, dict):
+                                    # 兼容两种响应：aiocqhttp 解包后的 data，或含 retcode/data 的完整信封
+                                    content = msg_resp.get("message")
+                                    if not content and isinstance(
+                                        msg_resp.get("data"), dict
+                                    ):
+                                        content = msg_resp["data"].get("message")
+                            except Exception as msg_e:
+                                logger.warning(
+                                    f"获取精华消息 {e.get('message_id')} 内容失败: {msg_e}"
+                                )
+
                         # 处理精华消息中的图片
                         essence_img_dir = (
                             Path(plugin.plugin_data_dir)
                             / str(group_id)
                             / "essence_images"
                         )
-                        content = e.get("content")
                         if content:
                             if not isinstance(content, list):
                                 content = [content]
@@ -393,18 +426,26 @@ async def execute_group_backup(plugin, client, group_id: int) -> bool:
                                         data["url"] = img_url
 
                                     if img_url:
-                                        # 备份图片到本地
-                                        ext = ".jpg"
-                                        file_name = (
-                                            img_id
-                                            if img_id
+                                        # 备份图片到本地，扩展名优先取文件名原有后缀
+                                        img_name = str(img_id) if img_id else ""
+                                        ext = Path(img_name).suffix.lower()
+                                        if ext not in (
+                                            ".jpg",
+                                            ".jpeg",
+                                            ".png",
+                                            ".gif",
+                                            ".webp",
+                                            ".bmp",
+                                        ):
+                                            ext = ".jpg"
+                                        stem = (
+                                            Path(img_name).stem
+                                            if img_name
                                             else hashlib.md5(
                                                 img_url.encode()
                                             ).hexdigest()
                                         )
-                                        local_path = (
-                                            essence_img_dir / f"{file_name}{ext}"
-                                        )
+                                        local_path = essence_img_dir / f"{stem}{ext}"
                                         success = await plugin._download_file(
                                             img_url, local_path
                                         )
@@ -424,7 +465,7 @@ async def execute_group_backup(plugin, client, group_id: int) -> bool:
                                 "operator_id": e.get("operator_id"),
                                 "operator_nick": e.get("operator_nick"),
                                 "operator_time": e.get("operator_time"),
-                                "content": e.get("content"),
+                                "content": content,
                             }
                         )
 
