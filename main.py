@@ -68,6 +68,7 @@ class GroupBackupPlugin(Star):
         self._backend_type = "napcat"
         self._is_llbot = False
         self._backend_client_id: int | None = None
+        self._backend_detection_lock = asyncio.Lock()
 
     async def _ensure_backend_detected(self, client) -> None:
         if client is None:
@@ -77,35 +78,43 @@ class GroupBackupPlugin(Star):
         if self._backend_client_id == client_id:
             return
 
-        self._backend_type = "napcat"
-        self._is_llbot = False
+        async with self._backend_detection_lock:
+            if self._backend_client_id == client_id:
+                return
 
-        try:
-            version_info = await client.api.call_action("get_version_info")
-            app_name = (
-                version_info.get("app_name") if isinstance(version_info, dict) else None
-            )
-            if (
-                app_name is None
-                and isinstance(version_info, dict)
-                and isinstance(version_info.get("data"), dict)
-            ):
-                app_name = version_info["data"].get("app_name")
-            if app_name == "LLOneBot":
-                self._backend_type = "llbot"
-                self._is_llbot = True
-            elif app_name == "SnowLuma":
-                self._backend_type = "snowluma"
-            # else: napcat (NapCat.Onebot 及未知)
-            self._backend_client_id = client_id
-            logger.debug(
-                f"[group_backup] 协议端探测结果: app_name={app_name or 'unknown'}, "
-                f"backend={self._backend_type}"
-            )
-        except Exception as e:
-            logger.warning(
-                f"[group_backup] 启动时探测协议端失败，默认按 NapCat 处理: {e}"
-            )
+            self._backend_type = "napcat"
+            self._is_llbot = False
+
+            try:
+                version_info = await client.api.call_action("get_version_info")
+                app_name = (
+                    version_info.get("app_name")
+                    if isinstance(version_info, dict)
+                    else None
+                )
+                if (
+                    app_name is None
+                    and isinstance(version_info, dict)
+                    and isinstance(version_info.get("data"), dict)
+                ):
+                    app_name = version_info["data"].get("app_name")
+
+                normalized_name = str(app_name or "").strip().lower()
+                if normalized_name == "llonebot":
+                    self._backend_type = "llbot"
+                    self._is_llbot = True
+                elif normalized_name == "snowluma":
+                    self._backend_type = "snowluma"
+
+                self._backend_client_id = client_id
+                logger.debug(
+                    f"[group_backup] 协议端探测结果: app_name={app_name or 'unknown'}, "
+                    f"backend={self._backend_type}"
+                )
+            except Exception as e:
+                logger.warning(
+                    f"[group_backup] 协议端探测失败，暂按 NapCat 处理: {e}"
+                )
 
     def _read_smtp_config(self) -> SmtpConfig | None:
         cfg = self.config.get("email_smtp", {}) or {}
@@ -138,12 +147,17 @@ class GroupBackupPlugin(Star):
 
     async def _get_group_album_list(self, client, group_id: int | str):
         await self._ensure_backend_detected(client)
-        if self._is_llbot:
+        if self._backend_type in ("llbot", "snowluma"):
             api = getattr(client, "api", None)
             if api is None:
-                raise RuntimeError("llbot client.api 不可用，无法获取群相册列表")
+                raise RuntimeError(
+                    f"{self._backend_type} client.api 不可用，无法获取群相册列表"
+                )
+            action_group_id = (
+                int(group_id) if self._backend_type == "snowluma" else str(group_id)
+            )
             result = await api.call_action(
-                "get_group_album_list", group_id=str(group_id)
+                "get_group_album_list", group_id=action_group_id
             )
             return result
         return await client.get_qun_album_list(group_id=str(group_id))

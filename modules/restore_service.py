@@ -8,7 +8,7 @@ from pathlib import Path
 from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent
 
-from .album_service import sort_backup_album_media
+from .album_service import get_album_media_list, sort_backup_album_media
 from .email_notifier import send_recall_emails
 
 
@@ -54,6 +54,38 @@ def _file_to_base64_uri(file_path: str) -> str:
     raw = Path(file_path).read_bytes()
     b64 = base64.b64encode(raw).decode("ascii")
     return f"base64://{b64}"
+
+
+def _build_ark_json_segment(raw_card) -> dict:
+    json_data = raw_card
+    if isinstance(raw_card, str):
+        try:
+            json_data = json.loads(raw_card)
+        except Exception:
+            pass
+
+    card_data_str = (
+        raw_card
+        if isinstance(raw_card, str)
+        else json.dumps(raw_card, ensure_ascii=False)
+    )
+    token = ""
+    if isinstance(json_data, dict) and isinstance(json_data.get("config"), dict):
+        token = json_data["config"].get("token", "")
+
+    return {
+        "type": "json",
+        "data": {"data": card_data_str, "config": {"token": token}},
+    }
+
+
+def _extract_snowluma_ark_message(response):
+    payload = response
+    if isinstance(payload, dict) and isinstance(payload.get("data"), dict):
+        payload = payload["data"]
+    if isinstance(payload, dict):
+        return payload.get("arkMsg") or payload.get("ark_msg")
+    return payload if isinstance(payload, str) else None
 
 
 async def group_restore_command(
@@ -347,13 +379,12 @@ async def group_restore_command(
                         existing_media_ids = set()
                         attach_info = None
                         while True:
-                            kwargs = {
-                                "group_id": str(current_group_id),
-                                "album_id": target_album_id,
-                                "attach_info": attach_info,
-                            }
-                            target_media_raw = await client.get_group_album_media_list(
-                                **kwargs
+                            target_media_raw = await get_album_media_list(
+                                plugin,
+                                client,
+                                current_group_id,
+                                target_album_id,
+                                attach_info,
                             )
 
                             media_items = plugin._normalize_album_media_response(
@@ -370,27 +401,24 @@ async def group_restore_command(
                                     existing_media_ids.add(str(mid))
 
                             # 检查是否还有更多分页
-                            if isinstance(target_media_raw, dict):
-                                next_has_more = target_media_raw.get(
-                                    "next_has_more",
-                                    target_media_raw.get("data", {}).get(
-                                        "next_has_more", False
-                                    ),
-                                )
-                                next_attach_info = target_media_raw.get(
-                                    "next_attach_info",
-                                    target_media_raw.get("data", {}).get(
-                                        "next_attach_info"
-                                    ),
-                                )
-                            else:
-                                next_has_more = False
-                                next_attach_info = None
-                            if not next_has_more:
+                            pagination = target_media_raw
+                            if isinstance(target_media_raw, dict) and isinstance(
+                                target_media_raw.get("data"), dict
+                            ):
+                                pagination = target_media_raw["data"]
+                            if not isinstance(pagination, dict):
+                                break
+                            next_has_more = pagination.get("next_has_more")
+                            if next_has_more is None:
+                                next_has_more = pagination.get("has_more")
+                            next_attach_info = pagination.get("next_attach_info")
+                            if next_attach_info is None:
+                                next_attach_info = pagination.get("nextAttachInfo")
+                            if next_has_more is False or not next_attach_info:
+                                break
+                            if next_attach_info == attach_info:
                                 break
                             attach_info = next_attach_info
-                            if not attach_info:
-                                break
                     except Exception as e:
                         logger.error(f"获取相册媒体列表失败: {e}")
                         existing_media_ids = set()
@@ -432,6 +460,19 @@ async def group_restore_command(
                                         group_id=str(current_group_id),
                                         album_id=str(target_album_id),
                                         files=[local_file.resolve().as_uri()],
+                                    )
+                                elif plugin._backend_type == "snowluma":
+                                    api = getattr(client, "api", None)
+                                    if api is None:
+                                        raise RuntimeError(
+                                            "snowluma client.api 不可用，无法上传群相册"
+                                        )
+                                    await api.call_action(
+                                        "upload_image_to_qun_album",
+                                        group_id=int(current_group_id),
+                                        album_id=str(target_album_id),
+                                        album_name=str(album_name),
+                                        file=local_file.resolve().as_uri(),
                                     )
                                 else:
                                     await client.upload_image_to_qun_album(
@@ -543,7 +584,28 @@ async def group_recall_command(plugin, event: AstrMessageEvent):
         if segment.startswith("@") and segment[1:].isdigit():
             # 识别到 @群号，需要发送群名片
             card_group_id = segment[1:]
-            if plugin._is_llbot or plugin._backend_type == "snowluma":
+            if plugin._backend_type == "snowluma":
+                try:
+                    api = getattr(client, "api", None)
+                    if api is None:
+                        raise RuntimeError(
+                            "snowluma client.api 不可用，无法获取群名片"
+                        )
+                    response = await api.call_action(
+                        "send_ark_share", group_id=int(card_group_id)
+                    )
+                    ark_message = _extract_snowluma_ark_message(response)
+                    if not ark_message:
+                        raise RuntimeError(f"send_ark_share 返回异常: {response}")
+                    recall_message_chain.append(_build_ark_json_segment(ark_message))
+                except Exception as e:
+                    logger.error(f"获取群名片 {card_group_id} 失败: {e}")
+                    recall_message_chain.append(
+                        {"type": "text", "data": {"text": segment}}
+                    )
+                continue
+
+            if plugin._is_llbot:
                 cq_group_card = f"[CQ:contact,type=group,id={card_group_id}]"
                 recall_message_chain.append(
                     {"type": "text", "data": {"text": cq_group_card}}
@@ -555,26 +617,7 @@ async def group_recall_command(plugin, event: AstrMessageEvent):
                 res = await client.call_action(
                     "ArkShareGroup", group_id=str(card_group_id)
                 )
-                json_data = res
-                if isinstance(res, str):
-                    try:
-                        json_data = json.loads(res)
-                    except Exception:
-                        pass
-
-                card_data_str = (
-                    res if isinstance(res, str) else json.dumps(res, ensure_ascii=False)
-                )
-                token = ""
-                if isinstance(json_data, dict) and "config" in json_data:
-                    token = json_data["config"].get("token", "")
-
-                recall_message_chain.append(
-                    {
-                        "type": "json",
-                        "data": {"data": card_data_str, "config": {"token": token}},
-                    }
-                )
+                recall_message_chain.append(_build_ark_json_segment(res))
             except Exception as e:
                 logger.error(f"获取群名片 {card_group_id} 失败: {e}")
                 recall_message_chain.append({"type": "text", "data": {"text": segment}})

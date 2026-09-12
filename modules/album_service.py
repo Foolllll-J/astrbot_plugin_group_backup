@@ -8,23 +8,120 @@ from typing import Any, Dict, List, Tuple
 from astrbot.api import logger
 
 
+def _first_value(item: Dict[str, Any], *keys: str) -> Any:
+    for key in keys:
+        value = item.get(key)
+        if value is not None and value != "":
+            return value
+    return None
+
+
+def _nested_url(item: Any) -> str:
+    if isinstance(item, str):
+        return item
+    if not isinstance(item, dict):
+        return ""
+    url_info = item.get("url")
+    if isinstance(url_info, dict):
+        return url_info.get("url", "")
+    if isinstance(url_info, str):
+        return url_info
+    return ""
+
+
+def _normalize_album_item(item: Dict[str, Any]) -> Dict[str, Any]:
+    normalized = dict(item)
+    aliases = {
+        "album_id": ("id",),
+        "create_time": ("createTime",),
+        "modify_time": ("modifyTime",),
+        "last_upload_time": ("lastUploadTime",),
+        "upload_number": ("uploadNumber", "picNum"),
+    }
+    for target, sources in aliases.items():
+        if normalized.get(target) is None:
+            value = _first_value(normalized, *sources)
+            if value is not None:
+                normalized[target] = value
+    return normalized
+
+
 def normalize_album_list_response(payload: Any) -> List[Dict[str, Any]]:
-    if isinstance(payload, list):
-        return [item for item in payload if isinstance(item, dict)]
-    if isinstance(payload, dict):
-        data = payload.get("data")
-        if isinstance(data, list):
-            return [item for item in data if isinstance(item, dict)]
+    containers: list[Any] = [payload]
+    if isinstance(payload, dict) and isinstance(payload.get("data"), (dict, list)):
+        containers.append(payload["data"])
+
+    for container in containers:
+        if isinstance(container, list):
+            return [
+                _normalize_album_item(item)
+                for item in container
+                if isinstance(item, dict)
+            ]
+        if isinstance(container, dict):
+            for key in ("album_list", "albumList", "list"):
+                album_list = container.get(key)
+                if isinstance(album_list, list):
+                    return [
+                        _normalize_album_item(item)
+                        for item in album_list
+                        if isinstance(item, dict)
+                    ]
     return []
 
 
 def normalize_album_media_response(payload: Any) -> List[Dict[str, Any]]:
-    if isinstance(payload, dict):
-        for key in ("media_list", "mediaList"):
-            val = payload.get(key)
-            if isinstance(val, list):
-                return [item for item in val if isinstance(item, dict)]
+    containers: list[Any] = [payload]
+    if isinstance(payload, dict) and isinstance(payload.get("data"), dict):
+        containers.append(payload["data"])
+    for container in containers:
+        if isinstance(container, dict):
+            for key in ("media_list", "mediaList"):
+                val = container.get(key)
+                if isinstance(val, list):
+                    return [item for item in val if isinstance(item, dict)]
     return []
+
+
+async def get_album_media_list(
+    plugin,
+    client,
+    group_id: int | str,
+    album_id: int | str,
+    attach_info: str | None,
+):
+    if getattr(plugin, "_backend_type", "napcat") == "snowluma":
+        api = getattr(client, "api", None)
+        if api is None:
+            raise RuntimeError("snowluma client.api 不可用，无法获取群相册媒体")
+        return await api.call_action(
+            "get_group_album_media_list",
+            group_id=int(group_id),
+            album_id=str(album_id),
+            attach_info=attach_info or "",
+        )
+    return await client.get_group_album_media_list(
+        group_id=str(group_id),
+        album_id=album_id,
+        attach_info=attach_info,
+    )
+
+
+def _album_change_marker(album: Dict[str, Any]) -> tuple[str, str]:
+    timestamp = _first_value(
+        album,
+        "modify_time",
+        "modifyTime",
+        "last_upload_time",
+        "lastUploadTime",
+    )
+    count = _first_value(
+        album,
+        "upload_number",
+        "uploadNumber",
+        "picNum",
+    )
+    return str(timestamp) if timestamp is not None else "", str(count) if count is not None else ""
 
 
 def sort_backup_album_media(media_list: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -64,16 +161,29 @@ async def backup_albums(
                 if not isinstance(album, dict):
                     continue
                 album_id = album.get("album_id")
-                album_name = album.get("name", album_id)
+                album_name = album.get("name") or album.get("album_name") or album_id
 
                 albums.append(
                     {
                         "album_id": album_id,
                         "name": album_name,
-                        "create_time": album.get("create_time"),
-                        "modify_time": album.get("modify_time"),
-                        "creator_nick": album.get("creator", {}).get("nick"),
-                        "upload_number": album.get("upload_number"),
+                        "create_time": _first_value(
+                            album, "create_time", "createTime"
+                        ),
+                        "modify_time": _first_value(
+                            album, "modify_time", "modifyTime"
+                        ),
+                        "last_upload_time": _first_value(
+                            album, "last_upload_time", "lastUploadTime"
+                        ),
+                        "creator_nick": (
+                            album.get("creator", {}).get("nick")
+                            if isinstance(album.get("creator"), dict)
+                            else album.get("createnickname")
+                        ),
+                        "upload_number": _first_value(
+                            album, "upload_number", "uploadNumber", "picNum"
+                        ),
                     }
                 )
 
@@ -119,7 +229,7 @@ async def backup_albums(
                 is_album_updated = False
                 old_media_list: List[Dict[str, Any]] = []
 
-                current_modify_time = str(album.get("modify_time"))
+                current_change_marker = _album_change_marker(album)
 
                 if (
                     latest_data
@@ -133,15 +243,15 @@ async def backup_albums(
                     )
                     old_media_list = latest_data["album_media"].get(album_id, [])
 
-                    # 只有当旧信息存在且修改时间一致时，才复用旧数据
+                    # 只有当旧信息存在且变化标记一致时，才复用旧数据
                     if (
                         old_album_info
-                        and str(old_album_info.get("modify_time"))
-                        == current_modify_time
+                        and _album_change_marker(old_album_info)
+                        == current_change_marker
                     ):
                         media_list = old_media_list
                         is_album_updated = False
-                        logger.debug(f"相册 {album_name} 修改时间未变，复用本地记录。")
+                        logger.debug(f"相册 {album_name} 变化标记未变，复用本地记录。")
                     else:
                         is_album_updated = True
                 else:
@@ -162,12 +272,13 @@ async def backup_albums(
                                     f"相册 {album_name} 分页超过 {_max_pages} 页，强制终止"
                                 )
                                 break
-                            kwargs = {
-                                "group_id": str(group_id),
-                                "album_id": album_id,
-                                "attach_info": attach_info,
-                            }
-                            result = await client.get_group_album_media_list(**kwargs)
+                            result = await get_album_media_list(
+                                plugin,
+                                client,
+                                group_id,
+                                album_id,
+                                attach_info,
+                            )
                             if (
                                 isinstance(result, dict)
                                 and result.get("retcode", 0) != 0
@@ -177,14 +288,39 @@ async def backup_albums(
                             page_media = normalize_album_media_response(result)
                             raw_media_list.extend(page_media)
 
-                            next_has_more = result.get("next_has_more")
+                            pagination = result
+                            if isinstance(result, dict) and isinstance(
+                                result.get("data"), dict
+                            ):
+                                pagination = result["data"]
+                            next_has_more = (
+                                pagination.get("next_has_more")
+                                if isinstance(pagination, dict)
+                                else None
+                            )
                             if next_has_more is None:
-                                next_has_more = result.get("has_more")
-                            next_attach_info = result.get("next_attach_info")
+                                next_has_more = (
+                                    pagination.get("has_more")
+                                    if isinstance(pagination, dict)
+                                    else None
+                                )
+                            next_attach_info = (
+                                pagination.get("next_attach_info")
+                                if isinstance(pagination, dict)
+                                else None
+                            )
                             if next_attach_info is None:
-                                next_attach_info = result.get("attach_info")
+                                next_attach_info = (
+                                    pagination.get("attach_info")
+                                    if isinstance(pagination, dict)
+                                    else None
+                                )
                             if next_attach_info is None:
-                                next_attach_info = result.get("nextAttachInfo")
+                                next_attach_info = (
+                                    pagination.get("nextAttachInfo")
+                                    if isinstance(pagination, dict)
+                                    else None
+                                )
                             if next_has_more is not None:
                                 if not next_has_more:
                                     break
@@ -211,29 +347,32 @@ async def backup_albums(
                                 img_detail = m.get("image")
                                 if img_detail:
                                     media_id = img_detail.get("lloc")
-                                    photo_urls = img_detail.get("photo_url", [])
+                                    photo_urls = _first_value(
+                                        img_detail, "photo_url", "photoUrls"
+                                    ) or []
                                     for p in photo_urls:
+                                        if not isinstance(p, dict):
+                                            continue
                                         if p.get("spec") in [1, 6]:
-                                            best_url = p.get("url", {}).get("url", "")
+                                            best_url = _nested_url(p)
                                             break
                                     if not best_url and photo_urls:
-                                        best_url = (
-                                            photo_urls[0].get("url", {}).get("url", "")
-                                        )
+                                        best_url = _nested_url(photo_urls[0])
                                     if not best_url:
-                                        best_url = img_detail.get(
-                                            "default_url", {}
-                                        ).get("url", "")
+                                        default_url = _first_value(
+                                            img_detail, "default_url", "defaultUrl"
+                                        )
+                                        best_url = _nested_url(default_url)
 
                             elif media_type == 1:
                                 video_detail = m.get("video")
                                 if video_detail:
                                     media_id = video_detail.get("id")
-                                    video_urls = video_detail.get("video_url", [])
+                                    video_urls = _first_value(
+                                        video_detail, "video_url", "videoUrl"
+                                    ) or []
                                     if video_urls:
-                                        best_url = (
-                                            video_urls[0].get("url", {}).get("url", "")
-                                        )
+                                        best_url = _nested_url(video_urls[0])
                                     if not best_url:
                                         best_url = video_detail.get("url")
 
@@ -243,7 +382,9 @@ async def backup_albums(
                                         "media_id": media_id or m.get("id"),
                                         "url": best_url,
                                         "media_type": media_type,
-                                        "upload_time": m.get("upload_time"),
+                                        "upload_time": _first_value(
+                                            m, "upload_time", "uploadTime"
+                                        ),
                                     }
                                 )
                             else:
